@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+# uv writes uv.lock on every command; we don't track it (this server is
+# distributed as a script, not a library, and the lockfile churns per-machine).
+uv.lock
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.env
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+analyze/
+.claude
+.mcp.json
+hosts.toml
+hosts-e2e.toml
+
+# Integration-test key material generated on first run of `pytest -m integration`.
+# See tests/integration/conftest.py -- ephemeral ed25519 keypair for the local
+# dockerized sshd on 127.0.0.1:2222. Never commit.
+tests/integration/keys/
+tests/integration/known_hosts
+
+BOOTSTRAP.md

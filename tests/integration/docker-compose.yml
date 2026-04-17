@@ -1,0 +1,20 @@
+# Local sshd fixture for integration tests.
+# Bring up with:  docker compose -f tests/integration/docker-compose.yml up -d
+# Then run:       pytest -m integration
+services:
+  sshd:
+    image: linuxserver/openssh-server:latest
+    container_name: ssh-mcp-test-sshd
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - PASSWORD_ACCESS=false
+      - USER_NAME=tester
+      - PUBLIC_KEY_FILE=/keys/test.pub
+      - SUDO_ACCESS=true
+    volumes:
+      - ./keys:/keys:ro
+    ports:
+      - "2222:2222"
+    restart: unless-stopped

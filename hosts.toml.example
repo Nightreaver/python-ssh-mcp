@@ -1,0 +1,195 @@
+# hosts.toml -- per-host policy for ssh-mcp.
+#
+# Copy to hosts.toml and edit. Everything in [defaults] applies to every
+# host below unless explicitly overridden. Resolution order for each field:
+#   tool argument (if any)  ->  [hosts.<alias>]  ->  [defaults]  ->  env / built-in.
+#
+# ---------------------------------------------------------------------------
+
+[defaults]
+# User applied when a [hosts.<alias>] block doesn't set its own.
+user = "deploy"
+
+# Default port. Standard SSH is 22; override per host for bastions on
+# non-standard ports.
+port = 22
+
+# linux | macos | bsd. Only linux is fully supported today; the field is
+# reserved for future OS-specific command paths.
+platform = "linux"
+
+# Default sudo strategy. Only "per-call" is implemented; "persistent-su"
+# logs a WARNING at startup and falls back to per-call.
+sudo_mode = "per-call"
+
+# Allow persistent shell sessions (ssh_shell_open / ssh_shell_exec) on this
+# host. Default true -- ALLOW_DANGEROUS_TOOLS remains the primary security
+# gate. Set false per-host when you want arbitrary exec permitted but
+# stateful shells denied (e.g. production where LLM-tracked cwd is risky).
+persistent_session = true
+
+# path_allowlist: low-access tools (cp, mv, edit, patch, upload, delete, ...)
+# and read-path tools (sftp_list, sftp_stat, sftp_download, find) only
+# accept paths that canonicalize (after following symlinks) into one of
+# these roots. Unioned with SSH_PATH_ALLOWLIST from the env.
+#
+# Empty list here = "no default scope" -- each host must define its own
+# (or SSH_PATH_ALLOWLIST in env covers it). EMPTY MEANS DENIED.
+#
+# Special "allow everything" sentinel: ["*"] or ["/"]. Widens MCP-side
+# path scoping to every absolute path on the host; OS-level file
+# permissions still apply. Startup logs a WARNING for any host that
+# uses the sentinel so it's grep-able in audit output.
+path_allowlist = []
+
+# restricted_paths: zones inside path_allowlist that low-access and
+# sftp-read tools REFUSE, even when the path otherwise resolves to an
+# allowed root. Typical use: an SMB-mounted /mnt/shared where the LLM
+# should have full host access except for that shared data.
+# Operators who really must reach a restricted path fall back to
+# ssh_exec_run / ssh_sudo_exec (subject to ALLOW_DANGEROUS_TOOLS). Unions
+# with env-level SSH_RESTRICTED_PATHS.
+restricted_paths = []
+
+# command_allowlist: first-token match for ssh_exec_run / ssh_sudo_exec.
+# Bare names ("systemctl") match any absolute path with that basename.
+# Absolute entries ("/usr/bin/systemctl") require exact match.
+#
+# Empty list here = "no default allowlist". When ALLOW_DANGEROUS_TOOLS is
+# true, EVERY exec is rejected unless ALLOW_ANY_COMMAND=true or a per-host
+# entry lists at least one token. Fail-closed is intentional.
+#
+# Special "allow everything" sentinel: ["*"]. Mirrors path_allowlist=["*"].
+# Widens exec scope to every command on that host. Startup logs a WARNING
+# (only when ALLOW_DANGEROUS_TOOLS=true, since otherwise the tools are
+# hidden anyway). Operators with a single "anything goes" dev box can use
+# this per-host instead of flipping ALLOW_ANY_COMMAND globally.
+command_allowlist = []
+
+# ---------------------------------------------------------------------------
+# Default auth. This is typically where the operator's workstation identity
+# lives -- one agent key pinned by fingerprint, offered to every host unless
+# a per-host [hosts.<name>.auth] block overrides.
+#
+# method = "agent"    -> use the operator's SSH agent (ssh-agent / Pageant /
+#                         the OpenSSH named pipe on Windows).
+# method = "key"      -> load a specific private key file. Requires `key=`.
+# method = "password" -> rejected unless ALLOW_PASSWORD_AUTH=true.
+# ---------------------------------------------------------------------------
+
+[defaults.auth]
+method = "agent"
+# Pin exactly one identity by SHA-256 fingerprint. Get yours with:
+#   uv run python -c "import asyncio; from ssh_mcp.ssh.agent import list_agent_fingerprints; print(asyncio.run(list_agent_fingerprints()))"
+# Or `ssh-keygen -lf ~/.ssh/id_ed25519.pub`.
+identity_fingerprint = "SHA256:REPLACE-WITH-YOUR-FINGERPRINT"
+
+# identities_only = true: refuse to offer any other agent identity to the
+# server. Protects against OpenSSH's 6-auth-attempt cap and stops leaking
+# your full identity set to every host you touch.
+identities_only = true
+
+# Optional: per-deployment scoped agent (e.g. a short-lived unlocked agent
+# used only during the ops window). Leave unset to use the default agent.
+# identity_agent = "${XDG_RUNTIME_DIR}/ssh-agent-ops.sock"
+
+# ===========================================================================
+# HOSTS
+# ===========================================================================
+# Each [hosts.<alias>] block is looked up by its alias when the LLM calls
+# a tool like ssh_host_ping(host="web01"). The `hostname` field is what
+# gets opened over TCP. Allow/block rules evaluate on `hostname`, never the
+# alias -- so to block a target, put the HOSTNAME in SSH_HOSTS_BLOCKLIST.
+# ===========================================================================
+
+[hosts.web01]
+# Simplest case: inherits everything from [defaults] -- user=deploy, port=22,
+# agent auth with the pinned fingerprint. Only the hostname differs.
+hostname = "web01.example.com"
+path_allowlist = ["/opt/app", "/var/log/nginx", "/etc/nginx"]
+# Optional per-host exec scope. Without at least one of these (or a broader
+# env-level SSH_COMMAND_ALLOWLIST), exec on this host is always rejected.
+command_allowlist = ["systemctl", "nginx", "tail", "grep", "journalctl"]
+
+# Optional per-host health thresholds evaluated by `ssh_host_alerts`. Any
+# field you omit is not checked. Unset threshold = silently skipped.
+[hosts.web01.alerts]
+disk_use_percent_max = 90     # breach when any mount > 90% full
+load_avg_1min_max    = 4.0    # Linux load avg (1 min) above this = breach
+mem_free_percent_min = 10     # MemAvailable / MemTotal < 10% = breach
+# disk_mounts = ["/", "/var"] # optional: restrict disk check to these mounts
+
+# ---------------------------------------------------------------------------
+# Bastion + target pattern. The bastion is itself a host entry -- the MCP
+# opens a connection to it first, then tunnels through for each target
+# that names it under `proxy_jump`.
+# ---------------------------------------------------------------------------
+
+[hosts.bastion]
+hostname = "bastion.example.com"
+user = "jumpuser"
+port = 22
+# Bastions usually have no path_allowlist / command_allowlist because we
+# don't operate on them directly -- they only carry connections.
+
+[hosts.db01]
+hostname = "db01.internal"
+user = "dbadmin"
+proxy_jump = "bastion"   # route this connection through hosts.bastion
+path_allowlist = [
+    "/var/lib/postgresql/backups",
+    "/etc/postgresql",
+]
+# Different role -> different key. Per-host [hosts.<name>.auth] overrides
+# [defaults.auth] entirely for this host.
+
+[hosts.db01.auth]
+method = "agent"
+identity_fingerprint = "SHA256:REPLACE-WITH-YOUR-DBADMIN-KEY-FINGERPRINT"
+identities_only = true
+
+# Multi-hop chain: target routes through bastion1 first, then bastion2.
+# [hosts.chained-target]
+# hostname = "inner.target.internal"
+# proxy_jump = ["bastion1", "bastion2"]
+
+# ---------------------------------------------------------------------------
+# Legacy host with on-disk key + passphrase from the OS keychain.
+# Use when the agent isn't available or the key was pre-existing.
+# Passphrase literals in this file are refused by the loader.
+# ---------------------------------------------------------------------------
+
+[hosts.legacy]
+hostname = "legacy.dmz.example.com"
+user = "root"
+port = 6622
+path_allowlist = ["/opt/legacy"]
+
+[hosts.legacy.auth]
+method = "key"
+key = "~/.ssh/id_legacy_rsa"
+# A LOCAL command that prints the passphrase on stdout. Invoked per connect;
+# output is never cached on disk or in memory beyond the asyncssh call.
+# Examples:
+#   macOS keychain:  "security find-generic-password -s ssh-legacy -w"
+#   Unix `pass`:     "pass show ssh/legacy"
+#   Bitwarden CLI:   "bw get password ssh-legacy"
+passphrase_cmd = "pass show ssh/legacy"
+
+# ===========================================================================
+# Notes
+# ===========================================================================
+#
+# * The MCP refuses to connect if known_hosts has no matching entry for a
+#   target (or if the live key mismatches). Pin first via ssh-keyscan, verify
+#   the fingerprint OUT-OF-BAND, then append. See README Quickstart section 2.
+#
+# * Every host defined here is implicitly on the allowlist. SSH_HOSTS_ALLOWLIST
+#   in .env adds further hostnames that have no hosts.toml entry (in which
+#   case a minimal HostPolicy is built from env defaults).
+#
+# * SSH_HOSTS_BLOCKLIST takes precedence over allowlist. Evaluated on the
+#   canonical `hostname` field, not on the alias.
+#
+# * Aliases (hosts.<alias>) are lookup keys only. They never appear on the
+#   wire and never match the blocklist.

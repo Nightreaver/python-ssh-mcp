@@ -1,4 +1,5 @@
 """Alert threshold evaluation. Pure functions; no SSH. Fed by ``ssh_host_alerts``."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,11 +11,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Breach:
-    metric: str        # "disk_use_percent" / "load_avg_1min" / "mem_free_percent"
-    threshold: float   # configured limit
-    current: float     # observed value
-    severity: str      # "warning" (breach of configured threshold)
-    detail: str        # human-readable context (mount path, etc.)
+    metric: str  # "disk_use_percent" / "load_avg_1min" / "mem_free_percent"
+    threshold: float  # configured limit
+    current: float  # observed value
+    severity: str  # "warning" (breach of configured threshold)
+    detail: str  # human-readable context (mount path, etc.)
 
 
 @dataclass
@@ -101,13 +102,3 @@ def evaluate(
             )
 
     return result
-
-
-def breach_to_dict(b: Breach) -> dict[str, str | float]:
-    return {
-        "metric": b.metric,
-        "threshold": b.threshold,
-        "current": b.current,
-        "severity": b.severity,
-        "detail": b.detail,
-    }

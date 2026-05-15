@@ -16,6 +16,7 @@ target the submodule where the tool being exercised lives -- monkeypatching
 this facade only rebinds the re-exported alias, not the binding the tool
 body resolves at call time.
 """
+
 from __future__ import annotations
 
 # canonicalize_and_check + check_not_restricted are re-exported for tests
@@ -25,6 +26,7 @@ from ..services.path_policy import (  # noqa: F401
     check_not_restricted,
     effective_allowlist,
     effective_restricted_paths,
+    resolve_path,
 )
 
 # Importing the subpackage triggers tool registration via decorator side-effects.
@@ -40,7 +42,6 @@ from .docker._helpers import (  # noqa: F401
     _DOCKER_NAME_RE,
     _DOCKER_NAMESPACE_FLAGS,
     _DOCKER_TIME_RE,
-    _DOCKER_VOLUME_FLAGS,
     _compose_prefix,
     _compose_project_op,
     _docker_prefix,

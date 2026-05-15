@@ -9,7 +9,7 @@ Covers:
 - unparseable digest -> HashError
 - path canonicalize + restricted-paths checks invoked (catches missing import)
 
-No live SSH. `monkeypatch.setattr` swaps `canonicalize_and_check` / the conn's
+No live SSH. `monkeypatch.setattr` swaps `resolve_path` / the conn's
 `conn.run` / SFTP stat with shim objects; we assert on the captured argv.
 """
 
@@ -164,10 +164,10 @@ class TestPosixHashing:
         algorithm: str,
         expected_binary: str,
     ) -> None:
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _posix_policy()
         ctx, holder = _ctx(policy)
@@ -194,10 +194,10 @@ class TestPosixHashing:
     async def test_parses_path_with_spaces(self, monkeypatch) -> None:
         """`<hex>  <path>` -- split once on whitespace, take the digest."""
 
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _posix_policy()
         ctx, holder = _ctx(policy)
@@ -215,10 +215,10 @@ class TestPosixHashing:
 
     @pytest.mark.asyncio
     async def test_non_zero_exit_raises_HashError(self, monkeypatch) -> None:
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _posix_policy()
         ctx, holder = _ctx(policy)
@@ -233,10 +233,10 @@ class TestPosixHashing:
 
     @pytest.mark.asyncio
     async def test_unparseable_digest_raises_HashError(self, monkeypatch) -> None:
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _posix_policy()
         ctx, holder = _ctx(policy)
@@ -250,10 +250,10 @@ class TestPosixHashing:
     async def test_digest_lowercased_even_if_upstream_uppercase(self, monkeypatch) -> None:
         """sha256sum is already lowercase but BusyBox variants can differ."""
 
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _posix_policy()
         ctx, holder = _ctx(policy)
@@ -303,10 +303,10 @@ class TestWindowsHashing:
         -EncodedCommand <b64>`, and the b64 must decode to a Get-FileHash
         call naming the right algorithm + LiteralPath."""
 
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         # Digest length per algorithm (matches the shape check in _hash_windows).
         digest_len = {"md5": 32, "sha1": 40, "sha256": 64, "sha512": 128}[algorithm]
@@ -355,10 +355,10 @@ class TestWindowsHashing:
         if the path came through an attacker-reachable channel.
         """
 
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _windows_policy()
         ctx, holder = _ctx(policy)
@@ -366,8 +366,8 @@ class TestWindowsHashing:
         fake_sha256 = ("CAFEBABE" * 16)[:64]
         holder["conn"] = _FakeConn(run_result=_FakeRun(stdout=f"{fake_sha256}\r\n"))
         path = "C:\\opt\\app\\O'Brien.txt"
-        # `canonicalize_and_check` is monkeypatched to echo the path, so the
-        # real allowlist check is bypassed; we're verifying the script shape.
+        # `resolve_path` is monkeypatched to echo the path, so the real
+        # allowlist check is bypassed; we're verifying the script shape.
         await ssh_file_hash(host="x", path=path, ctx=ctx)
 
         script = self._decode_encoded_cmd(holder["conn"].run_calls[0])
@@ -377,10 +377,10 @@ class TestWindowsHashing:
 
     @pytest.mark.asyncio
     async def test_windows_non_zero_exit_raises_HashError(self, monkeypatch) -> None:
-        async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+        async def fake_resolve(_conn, path, _policy, _settings, **_kw):
             return path
 
-        monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+        monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
         policy = _windows_policy()
         ctx, holder = _ctx(policy)
@@ -398,20 +398,19 @@ class TestWindowsHashing:
 
 
 @pytest.mark.asyncio
-async def test_file_hash_invokes_check_not_restricted(monkeypatch) -> None:
-    """Drive past validation with stubbed I/O and assert check_not_restricted
-    is actually called. Catches the NameError class of bugs where a helper
-    is referenced but not imported."""
+async def test_file_hash_invokes_resolve_path(monkeypatch) -> None:
+    """Drive past validation with stubbed I/O and assert `resolve_path` is
+    actually called. Catches the NameError class of bugs where the helper
+    is referenced but not imported. `resolve_path` bundles
+    `canonicalize_and_check` + `check_not_restricted`, so a single patch
+    covers both halves of the path-policy chain."""
     calls: list[Any] = []
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, policy, _settings, *, must_exist=True):
+        calls.append((path, must_exist, policy.platform))
         return path
 
-    def fake_check_not_restricted(canonical, restricted, platform):
-        calls.append((canonical, list(restricted), platform))
-
-    monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
-    monkeypatch.setattr(sftp_read_tools, "check_not_restricted", fake_check_not_restricted)
+    monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
     policy = _posix_policy()
     ctx, holder = _ctx(policy)
@@ -420,8 +419,9 @@ async def test_file_hash_invokes_check_not_restricted(monkeypatch) -> None:
     await ssh_file_hash(host="x", path="/opt/app/f", ctx=ctx)
 
     assert len(calls) == 1
-    canonical, _restricted, platform = calls[0]
-    assert canonical == "/opt/app/f"
+    path, must_exist, platform = calls[0]
+    assert path == "/opt/app/f"
+    assert must_exist is True
     assert platform == "posix"
 
 
@@ -434,10 +434,10 @@ async def test_hash_uses_canonical_path_not_raw_input(monkeypatch) -> None:
     command must see the canonical form, not the raw input. Catches a bug
     where a future refactor passes `path` through instead of `canonical`."""
 
-    async def fake_canonicalize(_conn, _path, _allowlist, **_kw):
+    async def fake_resolve(_conn, _path, _policy, _settings, **_kw):
         return "/opt/app/canonical/f"  # deliberately different from input
 
-    monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+    monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
     policy = _posix_policy()
     ctx, holder = _ctx(policy)
@@ -459,10 +459,10 @@ async def test_stat_failure_yields_negative_size(monkeypatch) -> None:
     succeeds but the file vanished, or the SFTP subsystem barfs). The tool
     must not raise -- the digest is still useful without a size."""
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, _policy, _settings, **_kw):
         return path
 
-    monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+    monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
     policy = _posix_policy()
     ctx, holder = _ctx(policy)
@@ -481,10 +481,10 @@ async def test_timeout_propagates_to_conn_run(monkeypatch) -> None:
     """Caller-supplied timeout reaches the conn.run call. Without this, the
     docstring promise of `timeout` control would be a lie."""
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, _policy, _settings, **_kw):
         return path
 
-    monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+    monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
     policy = _posix_policy()
     ctx, holder = _ctx(policy)
@@ -501,10 +501,10 @@ async def test_timeout_propagates_to_conn_run(monkeypatch) -> None:
 async def test_timeout_defaults_to_settings_value(monkeypatch) -> None:
     """No explicit timeout -> Settings.SSH_COMMAND_TIMEOUT is used."""
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, _policy, _settings, **_kw):
         return path
 
-    monkeypatch.setattr(sftp_read_tools, "canonicalize_and_check", fake_canonicalize)
+    monkeypatch.setattr(sftp_read_tools, "resolve_path", fake_resolve)
 
     policy = _posix_policy()
     ctx, holder = _ctx(policy)

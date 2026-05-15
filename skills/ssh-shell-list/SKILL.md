@@ -7,8 +7,8 @@ description: List open persistent shell sessions with cwd and idle age
 **Tier:** read-only | **Group:** `shell` | **Tags:** `{safe, read, group:shell}`
 
 Enumerate shell sessions currently tracked in the registry. Distinct from
-`ssh_session_list` / `ssh_session_stats` which report the SSH **connection
-pool** state -- this reports logical session state (cwd, idle time).
+`ssh_session_list` which reports the SSH **connection pool** state -- this
+reports logical session state (cwd, idle time).
 
 ## Inputs
 

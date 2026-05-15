@@ -14,6 +14,7 @@ Run with:
 Or one host:
     pytest -m e2e -v -k test_ubuntu
 """
+
 from __future__ import annotations
 
 import base64
@@ -43,7 +44,6 @@ from ssh_mcp.tools.low_access_tools import (
     ssh_patch,
     ssh_upload,
 )
-from ssh_mcp.tools.session_tools import ssh_session_list, ssh_session_stats
 from ssh_mcp.tools.sftp_read_tools import (
     ssh_file_hash,
     ssh_find,
@@ -51,6 +51,7 @@ from ssh_mcp.tools.sftp_read_tools import (
     ssh_sftp_list,
     ssh_sftp_stat,
 )
+from ssh_mcp.tools.shell_tools import ssh_session_list
 
 from .conftest import skip_if_unreachable, skip_if_windows
 
@@ -94,9 +95,7 @@ async def test_ping(alias, e2e_ctx, e2e_hosts, e2e_reachable):
     result = await ssh_host_ping(host=alias, ctx=e2e_ctx)
     assert result.host == e2e_hosts[alias].hostname
     assert result.reachable is True, f"ping says unreachable: {result}"
-    assert result.auth_ok is True, (
-        f"auth failed -- check ssh-agent has the pinned key loaded: {result}"
-    )
+    assert result.auth_ok is True, f"auth failed -- check ssh-agent has the pinned key loaded: {result}"
     assert result.server_banner, "server banner should be populated after handshake"
     assert result.latency_ms >= 0
 
@@ -116,7 +115,7 @@ async def test_platform_matches_banner(alias, e2e_ctx, e2e_hosts, e2e_reachable)
         assert declared == "windows", (
             f"{alias}: banner says Windows ({result.server_banner!r}) but "
             f"hosts.toml declares platform={declared!r}. Add "
-            f"`platform = \"windows\"` to [hosts.{alias}] so POSIX-only tools "
+            f'`platform = "windows"` to [hosts.{alias}] so POSIX-only tools '
             f"reject cleanly instead of failing on `realpath`/`uname`."
         )
     else:
@@ -130,9 +129,7 @@ async def test_known_hosts_verify(alias, e2e_ctx, e2e_reachable):
     """ssh_known_hosts_verify: live host key matches the pinned entry."""
     skip_if_unreachable(e2e_reachable, alias)
     result = await ssh_known_hosts_verify(host=alias, ctx=e2e_ctx)
-    assert result["matches_known_hosts"] is True, (
-        f"known_hosts mismatch (or no entry pinned): {result}"
-    )
+    assert result["matches_known_hosts"] is True, f"known_hosts mismatch (or no entry pinned): {result}"
     assert result["expected_fingerprint"], "no fingerprint in known_hosts -- pin first"
     assert result["live_fingerprint"] == result["expected_fingerprint"]
     assert result["error"] is None
@@ -172,9 +169,7 @@ async def test_exec_run_echo(alias, e2e_ctx, e2e_hosts, e2e_reachable):
             await ssh_exec_run(host=alias, command="echo hello", ctx=e2e_ctx)
         return
     sentinel = f"e2e-ping-{secrets.token_hex(4)}"
-    result = await ssh_exec_run(
-        host=alias, command=f"echo {sentinel}", ctx=e2e_ctx
-    )
+    result = await ssh_exec_run(host=alias, command=f"echo {sentinel}", ctx=e2e_ctx)
     assert result.exit_code == 0, result
     assert sentinel in result.stdout, result
     assert result.timed_out is False
@@ -234,11 +229,7 @@ async def test_file_hash(alias, e2e_ctx, e2e_hosts, e2e_reachable):
     """
     skip_if_unreachable(e2e_reachable, alias)
     policy = e2e_hosts[alias]
-    target = (
-        "C:\\Windows\\System32\\drivers\\etc\\hosts"
-        if policy.platform == "windows"
-        else "/etc/hostname"
-    )
+    target = "C:\\Windows\\System32\\drivers\\etc\\hosts" if policy.platform == "windows" else "/etc/hostname"
     result = await ssh_file_hash(host=alias, path=target, ctx=e2e_ctx)
     assert result.algorithm == "sha256"
     # HashResult.digest is lowercase hex, 64 chars for sha256.
@@ -250,9 +241,7 @@ async def test_file_hash(alias, e2e_ctx, e2e_hosts, e2e_reachable):
 # --- Write + cleanup roundtrip (POSIX low-access) ------------------------
 
 
-async def test_upload_download_hash_delete_roundtrip(
-    alias, e2e_ctx, e2e_hosts, e2e_reachable
-):
+async def test_upload_download_hash_delete_roundtrip(alias, e2e_ctx, e2e_hosts, e2e_reachable):
     """Full mutate-and-clean cycle in /tmp: mkdir -> upload -> stat -> hash
     -> sftp_download -> delete file -> rmdir folder. Skips Windows; we don't
     have a guaranteed-writable allowlisted path there yet (would need per-user
@@ -289,12 +278,10 @@ async def test_upload_download_hash_delete_roundtrip(
         import hashlib
 
         expected = hashlib.sha256(payload).hexdigest()
-        h = await ssh_file_hash(
-            host=alias, path=target, ctx=e2e_ctx, algorithm="sha256"
-        )
-        assert h.digest == expected, (
-            f"remote digest {h.digest} != local sha256 {expected} -- transfer corrupted"
-        )
+        h = await ssh_file_hash(host=alias, path=target, ctx=e2e_ctx, algorithm="sha256")
+        assert (
+            h.digest == expected
+        ), f"remote digest {h.digest} != local sha256 {expected} -- transfer corrupted"
 
         # 5. download + byte-compare
         dl = await ssh_sftp_download(host=alias, path=target, ctx=e2e_ctx)
@@ -310,9 +297,7 @@ async def test_upload_download_hash_delete_roundtrip(
         # rmdir scratch (best-effort; ignore failure so the assertion above
         # is what surfaces if something went wrong)
         with contextlib.suppress(Exception):
-            await ssh_delete_folder(
-                host=alias, path=scratch, ctx=e2e_ctx, recursive=True
-            )
+            await ssh_delete_folder(host=alias, path=scratch, ctx=e2e_ctx, recursive=True)
 
 
 # --- Extra host read tools ------------------------------------------------
@@ -364,9 +349,9 @@ async def test_host_alerts(alias, e2e_ctx, e2e_hosts, e2e_reachable):
             await ssh_host_alerts(host=alias, ctx=e2e_ctx)
         return
     result = await ssh_host_alerts(host=alias, ctx=e2e_ctx)
-    assert result["host"] == policy.hostname
-    assert isinstance(result["breaches"], list)
-    assert "metrics" in result
+    assert result.host == policy.hostname
+    assert isinstance(result.breaches, list)
+    assert isinstance(result.metrics, dict)
 
 
 # --- Extra SFTP read: find ------------------------------------------------
@@ -388,23 +373,27 @@ async def test_sftp_find(alias, e2e_ctx, e2e_hosts, e2e_reachable):
         root = "/etc"
         name = "hostname"
     result = await ssh_find(
-        host=alias, path=root, ctx=e2e_ctx,
-        name_pattern=name, kind="f", max_depth=1,
+        host=alias,
+        path=root,
+        ctx=e2e_ctx,
+        name_pattern=name,
+        kind="f",
+        max_depth=1,
     )
     assert result.host == policy.hostname
     assert isinstance(result.matches, list)
-    assert any(m.lower().endswith(name.lower()) for m in result.matches), (
-        f"expected to find {name!r} under {root!r}, got {result.matches!r}"
-    )
+    assert any(
+        m.lower().endswith(name.lower()) for m in result.matches
+    ), f"expected to find {name!r} under {root!r}, got {result.matches!r}"
 
 
 # --- Session / pool inspection -------------------------------------------
 
 
-async def test_session_list_and_stats(alias, e2e_ctx, e2e_hosts, e2e_reachable):
-    """ssh_session_list / stats after acquiring a connection via ping.
+async def test_session_list(alias, e2e_ctx, e2e_hosts, e2e_reachable):
+    """ssh_session_list after acquiring a connection via ping.
 
-    Both tools are ctx-only (no host arg), but we parametrize per alias so
+    The tool is ctx-only (no host arg), but we parametrize per alias so
     that each alias's ping warms the pool, then we inspect it. The shape
     check is enough -- actual pool contents depend on test ordering.
     """
@@ -416,11 +405,6 @@ async def test_session_list_and_stats(alias, e2e_ctx, e2e_hosts, e2e_reachable):
     assert "sessions" in listing
     assert "count" in listing
     assert listing["count"] >= 1
-
-    stats = await ssh_session_stats(ctx=e2e_ctx)
-    assert "open" in stats
-    assert "entries" in stats
-    assert stats["open"] >= 1
 
 
 # --- Extra exec tools -----------------------------------------------------
@@ -454,16 +438,21 @@ async def test_exec_run_streaming(alias, e2e_ctx, e2e_hosts, e2e_reachable):
     skip_if_unreachable(e2e_reachable, alias)
     policy = e2e_hosts[alias]
     from ssh_mcp.tools.exec_tools import ssh_exec_run_streaming
+
     if policy.platform == "windows":
         with pytest.raises(PlatformNotSupported):
             await ssh_exec_run_streaming(
-                host=alias, command="echo hi", ctx=e2e_ctx,
+                host=alias,
+                command="echo hi",
+                ctx=e2e_ctx,
                 progress=_StubProgress(),  # type: ignore[arg-type]
             )
         return
     sentinel = f"stream-{secrets.token_hex(3)}"
     result = await ssh_exec_run_streaming(
-        host=alias, command=f"echo {sentinel}", ctx=e2e_ctx,
+        host=alias,
+        command=f"echo {sentinel}",
+        ctx=e2e_ctx,
         progress=_StubProgress(),  # type: ignore[arg-type]
     )
     assert result.exit_code == 0
@@ -475,6 +464,7 @@ async def test_exec_script(alias, e2e_ctx, e2e_hosts, e2e_reachable):
     skip_if_unreachable(e2e_reachable, alias)
     policy = e2e_hosts[alias]
     from ssh_mcp.tools.exec_tools import ssh_exec_script
+
     if policy.platform == "windows":
         with pytest.raises(PlatformNotSupported):
             await ssh_exec_script(host=alias, script="echo hi", ctx=e2e_ctx)
@@ -513,7 +503,9 @@ async def test_cp_mv_edit_patch_deploy(alias, e2e_ctx, e2e_hosts, e2e_reachable)
     try:
         initial = b"greeting = hello\nfoo = bar\n"
         await ssh_upload(
-            host=alias, path=src, ctx=e2e_ctx,
+            host=alias,
+            path=src,
+            ctx=e2e_ctx,
             content_base64=base64.b64encode(initial).decode("ascii"),
         )
 
@@ -525,8 +517,11 @@ async def test_cp_mv_edit_patch_deploy(alias, e2e_ctx, e2e_hosts, e2e_reachable)
 
         # ssh_edit: single-occurrence replace on dst
         edit = await ssh_edit(
-            host=alias, path=dst, ctx=e2e_ctx,
-            old_string="hello", new_string="world",
+            host=alias,
+            path=dst,
+            ctx=e2e_ctx,
+            old_string="hello",
+            new_string="world",
         )
         assert edit.success is True
         dl = await ssh_sftp_download(host=alias, path=dst, ctx=e2e_ctx)
@@ -544,7 +539,10 @@ async def test_cp_mv_edit_patch_deploy(alias, e2e_ctx, e2e_hosts, e2e_reachable)
             "+foo = baz\n"
         )
         patched = await ssh_patch(
-            host=alias, path=dst, ctx=e2e_ctx, unified_diff=diff,
+            host=alias,
+            path=dst,
+            ctx=e2e_ctx,
+            unified_diff=diff,
         )
         assert patched.success is True
         dl = await ssh_sftp_download(host=alias, path=dst, ctx=e2e_ctx)
@@ -558,13 +556,16 @@ async def test_cp_mv_edit_patch_deploy(alias, e2e_ctx, e2e_hosts, e2e_reachable)
         # `realpath` and surfaces "no such file" as `PathNotAllowed` (the path
         # can't be canonicalized so it can't be checked against the allowlist).
         from ssh_mcp.ssh.errors import PathNotAllowed
+
         with pytest.raises(PathNotAllowed):
             await ssh_sftp_stat(host=alias, path=dst, ctx=e2e_ctx)
 
         # ssh_deploy: atomic replace with backup of `moved`
         new_payload = b"greeting = deployed\n"
         dep1 = await ssh_deploy(
-            host=alias, path=moved, ctx=e2e_ctx,
+            host=alias,
+            path=moved,
+            ctx=e2e_ctx,
             content_base64=base64.b64encode(b"initial = v1\n").decode("ascii"),
             backup=False,
         )
@@ -573,21 +574,26 @@ async def test_cp_mv_edit_patch_deploy(alias, e2e_ctx, e2e_hosts, e2e_reachable)
         # Second deploy with backup=True -- the prior file should be kept as
         # `<path>.bak-<ts>`; we confirm by listing the scratch dir.
         dep2 = await ssh_deploy(
-            host=alias, path=moved, ctx=e2e_ctx,
+            host=alias,
+            path=moved,
+            ctx=e2e_ctx,
             content_base64=base64.b64encode(new_payload).decode("ascii"),
             backup=True,
         )
         assert dep2["success"] is True
         listing = await ssh_sftp_list(host=alias, path=scratch, ctx=e2e_ctx)
         names = [e.name for e in listing.entries]
-        assert any(n.startswith("moved.txt.bak-") for n in names), (
-            f"expected a backup sibling of moved.txt in {names!r}"
-        )
+        assert any(
+            n.startswith("moved.txt.bak-") for n in names
+        ), f"expected a backup sibling of moved.txt in {names!r}"
 
     finally:
         with contextlib.suppress(Exception):
             await ssh_delete_folder(
-                host=alias, path=scratch, ctx=e2e_ctx, recursive=True,
+                host=alias,
+                path=scratch,
+                ctx=e2e_ctx,
+                recursive=True,
             )
 
 
@@ -620,7 +626,9 @@ async def test_shell_session_lifecycle(alias, e2e_ctx, e2e_hosts, e2e_reachable)
     try:
         # First exec: cd to /tmp -- sentinel updates session.cwd
         r1 = await ssh_shell_exec(
-            session_id=sid, command="cd /tmp && pwd", ctx=e2e_ctx,
+            session_id=sid,
+            command="cd /tmp && pwd",
+            ctx=e2e_ctx,
         )
         assert r1["exit_code"] == 0
         assert "/tmp" in r1["stdout"]

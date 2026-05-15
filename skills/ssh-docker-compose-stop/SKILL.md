@@ -14,7 +14,7 @@ Containers and volumes remain -- use `ssh_docker_compose_down` for teardown.
 | name | type | required | notes |
 |---|---|---|---|
 | `host` | str | yes | Alias |
-| `compose_file` | str | yes | Absolute; in `path_allowlist` |
+| `compose_file` | str | yes | Absolute; in `path_allowlist` and outside `restricted_paths` |
 | `compose_v1` | bool | no | Default False; use legacy `docker-compose` binary -- see [compose_v1 explainer](../ssh-docker-compose-up/SKILL.md#compose-v1-vs-v2-compose_v1-switch) |
 
 ## Returns
@@ -35,6 +35,11 @@ Containers and volumes remain -- use `ssh_docker_compose_down` for teardown.
 ```python
 ssh_docker_compose_stop(host="docker1", compose_file="/opt/app/docker-compose.yml")
 ```
+
+## Common failures
+
+- `PathNotAllowed` -- compose_file outside allowlist.
+- `PathRestricted` -- compose_file inside a restricted zone (e.g. SMB mount, NFS share).
 
 ## Related
 

@@ -8,7 +8,7 @@
 An SSH MCP server built in Python on top of FastMCP. The goal: give an LLM real SSH access to many hosts while keeping fine-grained control over what it can and can't do. The configuration surface is deliberately broad — probably overkill if you just want a single `ssh_exec` tool, but it pays off once you start connecting more than one host or locking the agent down to specific paths, commands, and visibility tiers. If a tool you need isn't here, open an issue.
 
 Currently implemented:
-57 tools across 8 groups, 457 passing unit tests + 6 dockerized-sshd integration tests + an opt-in `tests/e2e/` suite that drives every tool against the operator's real `hosts.toml`. Strict `known_hosts` by default, path-allowlist confinement on every path-bearing tool, SHA-256-hashed audit log, operator-pluggable hooks. Most tools return typed Pydantic results so MCP clients see real schemas in `tools/list` (not generic `object`); the few that legitimately produce merged or bimodal payloads stay as `dict[str, Any]` with the rationale documented at the function. POSIX SSH targets supported end-to-end; Windows SSH targets supported for SFTP + file-ops + `ssh_file_hash` via PowerShell `-EncodedCommand` (see [ADR-0023](DECISIONS.md)); Docker CLI swappable for Podman via `SSH_DOCKER_CMD` / per-host `docker_cmd`.
+70 tools across 10 groups, 968 passing unit tests + 6 dockerized-sshd integration tests + an opt-in `tests/e2e/` suite that drives every tool against the operator's real `hosts.toml`. Strict `known_hosts` by default, path-allowlist confinement on every path-bearing tool, SHA-256-hashed audit log, operator-pluggable hooks. Most tools return typed Pydantic results so MCP clients see real schemas in `tools/list` (not generic `object`); the few that legitimately produce merged or bimodal payloads stay as `dict[str, Any]` with the rationale documented at the function. POSIX SSH targets supported end-to-end; Windows SSH targets supported for SFTP + file-ops + `ssh_file_hash` via PowerShell `-EncodedCommand` (see [ADR-0023](DECISIONS.md)); Docker CLI swappable for Podman via `SSH_DOCKER_CMD` / per-host `docker_cmd`.
 
 ## Contents
 
@@ -38,20 +38,21 @@ In this file:
 
 - **MCP-compliant server** exposing SSH over stdio (or HTTP if you prefer); transport speaks MCP directly, no shim.
 - **Four-tier access model** — `read` / `low-access` / `dangerous` / `sudo`. Each tier is toggled with its own env flag and enforced via FastMCP `Visibility` transforms. Default: read-only.
-- **Nine tool groups** orthogonal to tiers (`host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`). `SSH_ENABLED_GROUPS` trims the catalog to what a given assistant actually needs.
-- **67 tools**: see [TOOLS.md](TOOLS.md) for the complete per-tool reference. Highlights:
+- **Ten tool groups** orthogonal to tiers (`host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`). `SSH_ENABLED_GROUPS` trims the catalog to what a given assistant actually needs.
+- **70 tools**: see [TOOLS.md](TOOLS.md) for the complete per-tool reference. Highlights:
   - Read-only probes (ping, host info, disk usage, processes, alerts, known-hosts verify)
   - SFTP reads (list, stat, download, find) with remote-realpath confinement
   - Low-access file ops (cp, mv, mkdir, delete, delete_folder, edit, patch, upload, deploy) — SFTP-first, atomic writes
   - Exec tier with per-call timeout, streaming variant, and TTY-need hint in results
   - Sudo tier (password piped via stdin, never argv; env passwords hard-rejected at startup)
   - 22 Docker tools (ps, logs, inspect, stats, images, compose up/down/logs/..., container lifecycle, exec, run)
+  - 3 APT/package tools (`ssh_apt_list`, `ssh_apt_search`, `ssh_apt_show`) — Debian/Ubuntu package inspection; non-Debian hosts get a clean `PlatformNotSupported`
   - Persistent shell sessions with cwd tracking (no remote PTY, sentinel-based state)
 - **Strict `known_hosts`** — no auto-accept; unknown or mismatched keys fail closed.
 - **Path confinement on everything** — each path-bearing tool canonicalizes via remote `realpath` (or SFTP realpath on Windows) and checks the allowlist, with `restricted_paths` carve-outs for sensitive zones.
 - **Per-host policy** in `hosts.toml` — users, keys, allowlists, sudo mode, platform, proxy chains, alert thresholds, persistent-session opt-out.
 - **Windows SSH target support** for SFTP + file-ops (see [ADR-0023](DECISIONS.md)); POSIX-only tools refuse Windows targets with a clean `PlatformNotSupported` that names the missing capability.
-- **Audit log** — one JSON line per mutating call, paths/commands SHA-256-hashed, `error` field is exception class only (full text stays at DEBUG locally).
+- **Audit log** — one JSON line per tool call (all tiers), paths/commands SHA-256-hashed, `error` field is exception class only (full text stays at DEBUG locally).
 - **Operator hooks**: import any module via `SSH_HOOKS_MODULE` for `STARTUP` / `SHUTDOWN` / `PRE_TOOL_CALL` / `POST_TOOL_CALL` events. Bounded per-hook timeout, exception isolation, backlog warning when pending tasks pile up.
 - **Runbooks via FastMCP Skills** — per-tool `SKILL.md` files give the LLM scoped how-to docs on demand.
 - **BM25 tool search** (optional) — replaces `tools/list` with `search_tools` + `call_tool` once 50+ schemas start eating context.
@@ -434,6 +435,56 @@ The loader warns if you enable exec without scoping what commands are allowed. E
 - Restart the MCP client — tool lists are cached per MCP server version.
 
 ---
+
+## Querying audit logs
+
+Every tool call writes one JSON line to the `ssh_mcp.audit` Python logger — including read-tier tools (since v1.4.0, all tiers are audited). There is **no in-process tool to query the audit log** — that is intentional ([INC-052](INCIDENTS.md)): if the LLM could read its own audit trail, a compromised or jailbroken agent could self-monitor what it has been caught doing and tune around it. Audit flows one-way to operators.
+
+Wire `ssh_mcp.audit` to the sink of your choice (file, Loki, Splunk, Datadog, journald, ...) in your own logging config. For local debugging or quick incident triage, write the lines to a file and query with `jq`:
+
+```python
+# In your own bootstrap (or a custom run_server wrapper)
+import logging
+h = logging.FileHandler("/var/log/ssh-mcp/audit.jsonl")
+h.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger("ssh_mcp.audit").addHandler(h)
+```
+
+Each line is a single compact JSON object. Schema:
+
+| field | type | notes |
+|---|---|---|
+| `ts` | float | Unix epoch seconds |
+| `correlation_id` | str | 16 hex chars; pairs with the DEBUG-level full-error line on `ssh_mcp.audit` |
+| `tool` | str | The MCP tool name (e.g. `ssh_exec_run`, `ssh_broadcast`) |
+| `tier` | str | `read` / `low-access` / `dangerous` / `sudo` |
+| `host` | str | Resolved hostname (or `?` for fan-out tools like `ssh_broadcast`) |
+| `result` | str | `ok` / `error` |
+| `duration_ms` | int | Wall-clock duration of the tool call |
+| `path_hash` | str | `sha256:<16hex>` of the canonical path (when the tool touched one) |
+| `command_hash` | str | `sha256:<16hex>` of the redacted command (when the tool ran one) |
+| `exit_code` | int | When applicable |
+| `error` | str | Exception class name only — full text stays at DEBUG level (INC-008) |
+
+Useful `jq` recipes:
+
+```bash
+# All errors in the last hour, sorted by tool
+jq -r 'select(.result == "error") | "\(.ts) \(.tool) \(.host) \(.error)"' \
+  /var/log/ssh-mcp/audit.jsonl | sort -k2
+
+# Slowest dangerous-tier calls (top 20 by duration_ms)
+jq 'select(.tier == "dangerous")' /var/log/ssh-mcp/audit.jsonl \
+  | jq -s 'sort_by(-.duration_ms) | .[:20] | .[] | {tool, host, duration_ms}'
+
+# Count by tool to see what the LLM is actually using
+jq -r '.tool' /var/log/ssh-mcp/audit.jsonl | sort | uniq -c | sort -rn
+
+# Trace one specific call end-to-end via correlation_id
+jq 'select(.correlation_id == "a1b2c3d4e5f6abcd")' /var/log/ssh-mcp/audit.jsonl
+```
+
+The `command_hash` and `path_hash` fields are **deduplication aids, not privacy controls** — short SHA-256 prefixes are trivially rainbow-tableable for common commands and canonical paths. If audit confidentiality matters, enforce it via transport encryption (TLS to your log backend) and access control on the sink itself.
 
 ## Disclaimer
 

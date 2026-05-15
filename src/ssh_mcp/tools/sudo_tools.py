@@ -41,10 +41,11 @@ async def ssh_sudo_exec(
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    require_posix(policy, tool="ssh_sudo_exec", reason="no `sudo` on Windows")
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    require_posix(resolved, tool="ssh_sudo_exec", reason="no `sudo` on Windows")
     check_command(command, policy, settings)
-    conn = await pool.acquire(policy)
+    conn = await pool.acquire(resolved)
 
     password = fetch_sudo_password(settings)
     result = await run_sudo(
@@ -76,9 +77,10 @@ async def ssh_sudo_run_script(
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    require_posix(policy, tool="ssh_sudo_run_script", reason="no `sudo` on Windows")
-    conn = await pool.acquire(policy)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    require_posix(resolved, tool="ssh_sudo_run_script", reason="no `sudo` on Windows")
+    conn = await pool.acquire(resolved)
 
     password = fetch_sudo_password(settings)
     result = await run_sudo_script(

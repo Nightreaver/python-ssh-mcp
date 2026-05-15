@@ -22,9 +22,13 @@ No chown/owner handling -- that would require sudo. Path-confined via
 |---|---|---|---|---|
 | `host` | str | yes | -- | Alias |
 | `path` | str | yes | -- | Absolute target path |
-| `content_base64` | str | yes | -- | Base64-encoded file bytes |
+| `content_text` | str | one-of | None | Plain UTF-8 content (configs, scripts, code). Empty string is valid. |
+| `content_base64` | str | one-of | None | Base64-encoded bytes (for binaries). |
 | `mode` | int | no | `0o644` | Octal perm bits |
 | `backup` | bool | no | `True` | Rename existing to `<path>.bak-<ts>` before write |
+
+Pass exactly ONE of `content_text` or `content_base64`. Same semantics
+as `ssh_upload`.
 
 ## Returns
 
@@ -56,17 +60,25 @@ No chown/owner handling -- that would require sudo. Path-confined via
 - Rolling back -- this tool creates backups, it doesn't restore them; use
   `ssh_mv` to swap a `.bak-<ts>` file back into place.
 
-## Example
+## Examples
 
 ```python
-import base64
-content = b"user nginx;\nworker_processes auto;\n..."
+# Plain-text config -- no encoding needed.
 ssh_deploy(
     host="docker1",
     path="/opt/app/nginx.conf",
-    content_base64=base64.b64encode(content).decode("ascii"),
+    content_text="user nginx;\nworker_processes auto;\n...",
     mode=0o644,
     backup=True,
+)
+
+# Binary artifact.
+import base64
+content = open("local.tar.gz", "rb").read()
+ssh_deploy(
+    host="docker1",
+    path="/opt/app/release.tar.gz",
+    content_base64=base64.b64encode(content).decode("ascii"),
 )
 ```
 

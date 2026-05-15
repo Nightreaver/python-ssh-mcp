@@ -9,6 +9,8 @@ description: Read logs from a docker-compose project (optionally scoped to one s
 Runs `<compose> -f <file> logs --tail=N --no-color [<service>]`. `--no-color`
 keeps ANSI escape sequences out of the captured output. Path-confined.
 
+A compose YAML is *executed* (mounts volumes, declares ports, runs init commands), so its file-path is policy-gated the same way read/write paths are.
+
 ## Context-protection defaults
 
 Same guards as `ssh_docker_logs` plus a service filter:
@@ -23,7 +25,7 @@ Same guards as `ssh_docker_logs` plus a service filter:
 | name | type | required | default | notes |
 |---|---|---|---|---|
 | `host` | str | yes | -- | Alias |
-| `compose_file` | str | yes | -- | Absolute path; in `path_allowlist` |
+| `compose_file` | str | yes | -- | Absolute path; in `path_allowlist` and outside `restricted_paths` |
 | `tail` | int | no | 50 | 1..10000 |
 | `service` | str | no | None | Limit to one service (argv-validated) |
 | `max_bytes` | int | no | 65536 | 1 KiB..10 MiB |
@@ -55,6 +57,12 @@ ssh_docker_compose_logs(
     tail=50,
 )
 ```
+
+## Common failures
+
+- `PathNotAllowed` -- compose_file outside allowlist.
+- `PathRestricted` -- compose_file inside a restricted zone (e.g. SMB mount, NFS share).
+- Output truncated at `max_bytes` -- narrow scope with `service=` or raise `max_bytes`.
 
 ## Related
 

@@ -7,6 +7,7 @@ deletion here (that lives in `dangerous_tools`). Hidden unless
 
 INC-043: extracted from the original monolithic `docker_tools.py`.
 """
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -15,12 +16,7 @@ from fastmcp import Context
 
 from ...app import mcp_server
 from ...services.audit import audited
-from ...services.path_policy import (
-    canonicalize_and_check,
-    check_not_restricted,
-    effective_allowlist,
-    effective_restricted_paths,
-)
+from ...services.path_policy import resolve_path
 from .._context import pool_from, resolve_host, settings_from
 from ._helpers import _compose_project_op, _run_docker, _validate_name
 
@@ -38,9 +34,7 @@ def _simple_container_op(subcommand: str) -> Any:
         _validate_name("container", container)
         return await _run_docker(ctx, host, [subcommand, "--", container])
 
-    _tool.__doc__ = (
-        f"`docker {subcommand} <container>`. Name is argv-validated; no shell."
-    )
+    _tool.__doc__ = f"`docker {subcommand} <container>`. Name is argv-validated; no shell."
     return _tool
 
 
@@ -84,21 +78,17 @@ async def ssh_docker_cp(
     """
     _validate_name("container", container)
     if direction not in ("from_container", "to_container"):
-        raise ValueError(
-            f"direction must be 'from_container' or 'to_container', got {direction!r}"
-        )
+        raise ValueError(f"direction must be 'from_container' or 'to_container', got {direction!r}")
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    # First acquire is for the canonicalize_and_check probe (`realpath -m`
-    # over a fresh exec channel). `_run_docker` calls `pool.acquire(policy)`
-    # again below; the keyed pool returns the SAME cached connection, so this
-    # is one TCP/SSH session, two channels.
-    conn = await pool.acquire(policy)
-
-    allowlist = effective_allowlist(policy, settings)
-    restricted = effective_restricted_paths(policy, settings)
-    plat = policy.platform
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    # First acquire is for the resolve_path probe (`realpath -m` over a fresh
+    # exec channel; resolve_path bundles canonicalize + allowlist +
+    # restricted-zones). `_run_docker` calls `pool.acquire(resolved)` again
+    # below; the keyed pool returns the SAME cached connection, so this is
+    # one TCP/SSH session, two channels.
+    conn = await pool.acquire(resolved)
 
     # `direction` is gated by the validator above, so the else-branch is
     # exhaustive. Using if/else (not if/elif/elif) means a future fourth
@@ -106,17 +96,11 @@ async def ssh_docker_cp(
     # branch point instead of silently leaving `argv` unbound.
     if direction == "from_container":
         # Dest on host. Parent must be reachable; file itself may not exist yet.
-        dst = await canonicalize_and_check(
-            conn, host_path, allowlist, must_exist=False, platform=plat,
-        )
-        check_not_restricted(dst, restricted, plat)
+        dst = await resolve_path(conn, host_path, policy, settings, must_exist=False)
         src = f"{container}:{container_path}"
     else:  # direction == "to_container"
         # Source on host. Must exist.
-        src = await canonicalize_and_check(
-            conn, host_path, allowlist, must_exist=True, platform=plat,
-        )
-        check_not_restricted(src, restricted, plat)
+        src = await resolve_path(conn, host_path, policy, settings, must_exist=True)
         dst = f"{container}:{container_path}"
     argv = ["cp", "--", src, dst]
     return await _run_docker(ctx, host, argv, timeout=timeout)
@@ -134,7 +118,11 @@ async def ssh_docker_compose_start(
     for hosts still running the legacy ``docker-compose`` standalone binary.
     """
     return await _compose_project_op(
-        ctx, host, compose_file, "start", compose_v1=compose_v1,
+        ctx,
+        host,
+        compose_file,
+        "start",
+        compose_v1=compose_v1,
     )
 
 
@@ -151,7 +139,11 @@ async def ssh_docker_compose_stop(
     standalone binary.
     """
     return await _compose_project_op(
-        ctx, host, compose_file, "stop", compose_v1=compose_v1,
+        ctx,
+        host,
+        compose_file,
+        "stop",
+        compose_v1=compose_v1,
     )
 
 
@@ -167,5 +159,9 @@ async def ssh_docker_compose_restart(
     still running the legacy ``docker-compose`` standalone binary.
     """
     return await _compose_project_op(
-        ctx, host, compose_file, "restart", compose_v1=compose_v1,
+        ctx,
+        host,
+        compose_file,
+        "restart",
+        compose_v1=compose_v1,
     )

@@ -35,27 +35,48 @@ async def ssh_exec_run(
     radius), cheaper (no command_allowlist round-trip), and audit cleaner.
     Only fall back to `ssh_exec_run` when no dedicated tool fits.
 
+    DO NOT USE FOR FILE WRITES. The single most common misuse of this tool is
+    `cat > path <<'EOF' ... EOF` / `tee path` / `echo "..." > path` /
+    `printf "..." > path` to create or replace a file's content. These ALL
+    have a dedicated tool that is safer (path-policy + atomic temp+rename +
+    audit), structured, and visible in the file-ops tier. The mapping table
+    below lists every pattern. If you find yourself writing a heredoc, STOP
+    and use ssh_upload (whole file) or ssh_edit (string replacement) or
+    ssh_patch (unified diff).
+
     Mapping cheat sheet (use the LEFT side if the task matches):
-      mkdir -p <dir>             -> ssh_mkdir
-      rm <file>                  -> ssh_delete
-      rm -rf <dir>               -> ssh_delete_folder
-      cp -a <src> <dst>          -> ssh_cp
-      mv <src> <dst>             -> ssh_mv
-      <upload local content>     -> ssh_upload  (base64 payload, atomic)
-      <sed-style edit>           -> ssh_edit    (old_text/new_text, atomic)
-      <apply unified diff>       -> ssh_patch
-      find <path> -name ...      -> ssh_find
-      df / ps / uname / uptime   -> ssh_host_disk_usage / ssh_host_processes / ssh_host_info
-      cat <file>                 -> ssh_sftp_download
-      ls <dir>                   -> ssh_sftp_list
-      stat <file>                -> ssh_sftp_stat
-      docker <anything>          -> ssh_docker_* (22 tools)
-      sudo <cmd>                 -> ssh_sudo_exec (separate gate)
+      mkdir -p <dir>                    -> ssh_mkdir
+      rm <file>                         -> ssh_delete
+      rm -rf <dir>                      -> ssh_delete_folder
+      cp -a <src> <dst>                 -> ssh_cp
+      mv <src> <dst>                    -> ssh_mv
+      cat > <path> <<EOF ... EOF        -> ssh_upload (use content_text=)
+      tee <path>                        -> ssh_upload (use content_text=)
+      echo "..." > <path>               -> ssh_upload (use content_text=)
+      printf "..." > <path>             -> ssh_upload (use content_text=)
+      cat > <path> <<EOF ... EOF (with backup needed) -> ssh_deploy
+      sed -i 's/old/new/' <path>        -> ssh_edit
+      patch < <diff>                    -> ssh_patch
+      find <path> -name ...             -> ssh_find
+      df / ps / uname / uptime          -> ssh_host_disk_usage / ssh_host_processes / ssh_host_info
+      ip addr / ip -j addr show         -> ssh_host_network
+      id / groups / getent passwd       -> ssh_user_info
+      cat <file>                        -> ssh_sftp_download
+      ls <dir>                          -> ssh_sftp_list
+      stat <file>                       -> ssh_sftp_stat
+      md5sum / sha256sum / shaXsum      -> ssh_file_hash
+      systemctl status / is-active / is-enabled -> ssh_systemctl_*
+      journalctl -u ...                 -> ssh_journalctl
+      docker <anything>                 -> ssh_docker_* (22 tools)
+      sudo <cmd>                        -> ssh_sudo_exec (separate gate)
+      <run same cmd on N hosts>         -> ssh_broadcast
+      <copy file from host A to host B> -> ssh_transfer
 
     When `ssh_exec_run` IS right:
-      - ad-hoc diagnostic one-liners (`systemctl status nginx`, `journalctl -u ...`)
-      - composed pipelines (`foo | grep | awk`)
-      - commands with no equivalent wrapper tool
+      - ad-hoc READ-ONLY diagnostic one-liners with no dedicated tool
+      - composed pipelines (`foo | grep | awk`) where no per-step tool fits
+      - vendor-specific or one-off commands (apk, dnf, brew, ...) with no
+        wrapper
 
     Non-zero exit codes are data (see `exit_code`), not raised. Timeouts return
     `timed_out=True` with any partial output captured. Commands are allowlist-
@@ -66,14 +87,15 @@ async def ssh_exec_run(
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
     require_posix(
-        policy,
+        resolved,
         tool="ssh_exec_run",
         reason="relies on POSIX shell (sh) + pkill for timeout cleanup",
     )
     check_command(command, policy, settings)
-    conn = await pool.acquire(policy)
+    conn = await pool.acquire(resolved)
 
     result = await exec_run(
         conn,
@@ -104,9 +126,10 @@ async def ssh_exec_script(
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    require_posix(policy, tool="ssh_exec_script", reason="pipes to `sh -s --`")
-    conn = await pool.acquire(policy)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    require_posix(resolved, tool="ssh_exec_script", reason="pipes to `sh -s --`")
+    conn = await pool.acquire(resolved)
 
     result = await exec_run(
         conn,
@@ -142,10 +165,11 @@ async def ssh_exec_run_streaming(
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    require_posix(policy, tool="ssh_exec_run_streaming", reason="relies on POSIX shell + pkill cleanup")
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    require_posix(resolved, tool="ssh_exec_run_streaming", reason="relies on POSIX shell + pkill cleanup")
     check_command(command, policy, settings)
-    conn = await pool.acquire(policy)
+    conn = await pool.acquire(resolved)
 
     await progress.set_total(None)
 

@@ -4,41 +4,42 @@ Tools are grouped by **tier** (which `ALLOW_*` flag they require) and within eac
 
 For a full per-tool runbook, follow the **skill** link on each entry — the SKILL.md files cover `When to call`, `When NOT to call`, examples, common failures, and related tools.
 
-- 67 tools total
-- 9 tool groups: `host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`
+- 77 tools total
+- 10 tool groups: `host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`
 - 4 tiers: read (always on) · low-access · dangerous · sudo
 - See [README.md](README.md) for tier flags, host config, restricted paths, BM25 search, and `SSH_ENABLED_GROUPS` examples.
 
 ## Context cost per group
 
-How many bytes each group adds to the `tools/list` response every MCP turn — so operators can decide what to trim via `SSH_ENABLED_GROUPS`. Measured by serializing each tool's wire schema (`name`, `description`, `inputSchema`, `annotations`) as it is sent to the client. Tokens are a bytes/4 heuristic — directional, not exact (JSON tokenises slightly denser on Claude / GPT-4-family).
+How many bytes each group adds to the `tools/list` response every MCP turn — so operators can decide what to trim via `SSH_ENABLED_GROUPS`. Measured by serializing each tool's wire schema (`name`, `description`, `inputSchema`, `outputSchema`, `_meta`) as it is sent to the client. Tokens are a bytes/4 heuristic — directional, not exact (JSON tokenises slightly denser on Claude / GPT-4-family).
 
 | Group | Tools | Bytes | ~Tokens | Avg / tool |
 |---|---:|---:|---:|---:|
-| `docker` | 26 | 15,337 | ~3,834 | 589 B |
-| `systemctl` | 8 | 4,501 | ~1,125 | 562 B |
-| `file-ops` | 9 | 4,062 | ~1,015 | 451 B |
-| `exec` | 3 | 3,189 | ~797 | **1,063 B** (densest — rich input schemas) |
-| `sftp-read` | 5 | 3,187 | ~796 | 637 B |
-| `host` | 6 | 2,275 | ~568 | 379 B |
-| `shell` | 4 | 1,377 | ~344 | 344 B |
-| `sudo` | 2 | 1,339 | ~334 | 669 B |
-| `session` | 2 | 324 | ~81 | 162 B |
-| **Total** | **65** | **35,591** | **~8,897** | — |
+| `host` | 13 | 20,292 | ~5,073 | 1,561 B |
+| `docker` | 26 | 20,038 | ~5,009 | 771 B |
+| `file-ops` | 11 | 14,357 | ~3,589 | 1,305 B |
+| `exec` | 4 | 11,358 | ~2,839 | **2,840 B** (densest — rich input schemas) |
+| `sftp-read` | 5 | 5,685 | ~1,421 | 1,137 B |
+| `systemctl` | 8 | 5,621 | ~1,405 | 703 B |
+| `sudo` | 2 | 3,015 | ~753 | 1,508 B |
+| `shell` | 4 | 1,958 | ~489 | 490 B |
+| `pkg` | 3 | 1,884 | ~471 | 628 B |
+| `session` | 1 | 292 | ~73 | 292 B |
+| **Total** | **77** | **84,500** | **~21,125** | — |
 
-**Savings from common `SSH_ENABLED_GROUPS` trims:**
+**Savings from common `SSH_ENABLED_GROUPS` trims** (vs. the ~21,125-tok full catalogue):
 
-- Drop `docker` only → ~5,063 tok (saves **43%** — biggest single win)
-- Drop `systemctl` only → ~7,772 tok (saves **12%**)
-- Drop both → ~3,938 tok (saves **55%**)
-- Keep only `host,sftp-read,docker` (observability + container triage) → ~5,200 tok (saves ~42%)
-- Keep only `host,session,systemctl` (systemd-triage persona) → ~1,774 tok (saves ~80%)
+- Drop `docker` only → ~16,116 tok left (saves **24%** — biggest single win)
+- Drop `systemctl` only → ~19,720 tok left (saves **7%**)
+- Drop both → ~14,711 tok left (saves **30%**)
+- Keep only `host,sftp-read,docker` (observability + container triage) → ~11,503 tok (saves **46%**)
+- Keep only `host,session,systemctl` (systemd-triage persona) → ~6,551 tok (saves **69%**)
 
 ## Contents
 
 - [Platform compatibility matrix](#platform-compatibility-matrix)
 - [How to read each entry](#how-to-read-each-entry)
-- [Read tier (always on)](#read-tier-always-on) — 33 tools
+- [Read tier (always on)](#read-tier-always-on) — 36 tools
 - [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 18 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
 - [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 14 tools (`ALLOW_DANGEROUS_TOOLS=true`)
 - [Sudo tier](#sudo-tier-allow_sudotrue) — 2 tools (`ALLOW_SUDO=true`)
@@ -63,17 +64,19 @@ Tools tagged **POSIX-only** refuse Windows targets with `PlatformNotSupported` (
 | `shell` (list / close) | yes | yes | In-memory |
 | `docker` | yes | **no** | Scope deferred — see ADR-0023 |
 | `systemctl` | yes | **no** | systemd is Linux-only; no explicit platform gate (clean non-zero exit on Windows targets) |
+| `pkg` | yes (Debian/Ubuntu) | **no** | APT binary probe gates all three tools; non-Debian POSIX hosts return `PlatformNotSupported` |
 
 ---
 
 ## Sections by group
 
-- [Read tier](#read-tier-always-on) — 33 tools, no flag needed
+- [Read tier](#read-tier-always-on) — 36 tools, no flag needed
   - [Host & connection](#host--connection-grouphost) (7)
   - [Sessions](#sessions-groupsession) (2)
   - [SFTP reads](#sftp-reads-groupsftp-read) (5)
   - [Docker (read)](#docker-read-groupdocker) (9)
   - [systemctl (read)](#systemctl-read-groupsystemctl) (8)
+  - [Package management (read)](#package-management-read-grouppkg) (3)
   - [Persistent shell (read)](#persistent-shell-read-groupshell) (1)
   - [Alerts](#alerts-grouphost) (covered above)
 - [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 18 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
@@ -144,22 +147,26 @@ path_allowlist = ["/var/log", "/opt/app"]          # scope for sftp-read + find
 
 ## Host & connection (`group:host`)
 
-- **`ssh_host_ping`** — TCP + SSH handshake probe. Returns reachability, auth status, latency, server banner, and the pinned known_host fingerprint. Inputs: `host`. [skill](skills/ssh-host-ping/SKILL.md)
-- **`ssh_host_info`** — `uname -a`, `/etc/os-release`, and `uptime`, parsed. Fixed argv, no shell interpolation. Inputs: `host`. [skill](skills/ssh-host-info/SKILL.md)
+- **`ssh_host_ping`** — TCP + SSH handshake probe. Returns reachability, auth status, latency, server banner, and the pinned known_host fingerprint. **Auto-injects BOTH note layers**: `operator_notes` (hard-rule baseline from `hosts.toml`'s `notes` field, [INC-059](INCIDENTS.md)) when `SSH_PING_INCLUDES_NOTES=True` (default), AND `agent_notes` (the LLM's own session-spanning sidecar at `<SSH_HOST_NOTES_DIR>/<alias>.md`, [INC-060](INCIDENTS.md)) when `SSH_PING_INCLUDES_AGENT_NOTES=True` (default). Independent toggles per layer. Makes ping the canonical "starting work on this host" probe that surfaces full host memory into LLM context for free. Trade-off for agent layer: sidecars can grow to `SSH_HOST_NOTES_MAX_BYTES` (default 256 KiB); flip `SSH_PING_INCLUDES_AGENT_NOTES=false` if context inflation matters. Inputs: `host`. [skill](skills/ssh-host-ping/SKILL.md)
+- **`ssh_host_info`** — `uname -a`, `/etc/os-release`, `uptime`, `nproc`, `/proc/cpuinfo`, `hostname -f` parsed in parallel. Each probe runs independently (`return_exceptions=True`) so a missing one doesn't lose its siblings. Result includes `cpu_model`, `cpu_count`, `hostname_fqdn` ([INC-052](INCIDENTS.md)). Fixed argv, no shell interpolation. Inputs: `host`. [skill](skills/ssh-host-info/SKILL.md)
 - **`ssh_host_disk_usage`** — `df -PTh` parsed into structured entries. Inputs: `host`. [skill](skills/ssh-host-disk-usage/SKILL.md)
+- **`ssh_host_network`** — Per-interface state from `ip -j addr show`: name, oper-state, MAC, addresses (family + address + prefix length). Drops kernel-internal noise. Hosts without `iproute2` (busybox, etc.) get an empty list rather than a raise. POSIX-only. Inputs: `host`. [skill](skills/ssh-host-network/SKILL.md)
 - **`ssh_host_processes`** — Top-N processes by CPU via `ps -eo pid,user,pcpu,pmem,comm --sort=-pcpu`. Inputs: `host`, `top_n` (default 25). [skill](skills/ssh-host-processes/SKILL.md)
 - **`ssh_host_alerts`** — Evaluate per-host thresholds from `[hosts.<name>.alerts]` (disk %, load, mem free, optional disk-mount filter). Returns `breaches[]` + raw `metrics`. Inputs: `host`. [skill](skills/ssh-host-alerts/SKILL.md)
+- **`ssh_user_info`** — Structured `/etc/passwd` row + group memberships for one user. Sourced from `getent passwd` + `id -Gn` + `id -gn`; no sudo. `username=None` queries the SSH user via `id -un`. Username validated against POSIX 3.437 before being passed to remote commands. Returns `{uid, gid, gecos, home, shell, primary_group, groups[]}`. POSIX-only. Inputs: `host`, `username` (optional). [skill](skills/ssh-user-info/SKILL.md)
 - **`ssh_known_hosts_verify`** — Verify live server key matches `known_hosts` by attempting a real connect. Returns expected vs. actual fingerprints. Inputs: `host`. [skill](skills/ssh-known-hosts-verify/SKILL.md)
-- **`ssh_host_list`** — Enumerate the hosts currently loaded from `hosts.toml` + `SSH_HOSTS_ALLOWLIST`. Returns `{alias, hostname, port, platform, user, auth_method}` per entry — sanitized, no credentials. Inputs: *(none)*. [skill](skills/ssh-host-list/SKILL.md)
+- **`ssh_host_list`** — Enumerate the hosts currently loaded from `hosts.toml` + `SSH_HOSTS_ALLOWLIST`. Returns `{alias, hostname, port, platform, user, auth_method, has_notes}` per entry — sanitized, no credentials. `has_notes: bool` is true when EITHER the operator baseline (`hosts.toml.notes`) or the agent sidecar (`<SSH_HOST_NOTES_DIR>/<alias>.md`) has content ([INC-055](INCIDENTS.md)) so callers know which hosts to drill into via `ssh_host_notes`. Inputs: *(none)*. [skill](skills/ssh-host-list/SKILL.md)
+- **`ssh_host_notes`** — Read both layers of per-host memory: `operator_notes` (hard-rule baseline from `hosts.toml`'s `notes` field; READ-ONLY to the LLM) + `agent_notes` (the LLM's own working memory across sessions, sidecar markdown at `<SSH_HOST_NOTES_DIR>/<alias>.md`; READ-WRITE via the `_append` / `_set` tools). Pure in-memory + one local FS read; no SSH. Use BEFORE doing anything substantive on a host you haven't worked with this session — operator notes are hard rules, agent notes are your past self's hard-won lessons ([INC-055](INCIDENTS.md)). Inputs: `host`. [skill](skills/ssh-host-notes/SKILL.md)
 
 ## Host policy reload (`group:host`, low-access)
 
 - **`ssh_host_reload`** — Re-read `hosts.toml` from disk and swap the in-memory policy atomically. Returns `{loaded, source, added, removed, changed}` so callers see what changed vs. the previous load. Validates the new file before swapping — on parse/validation failure the existing fleet stays intact. Does NOT invalidate pooled SSH connections; live sessions retain their original policy until they drop on keepalive. `ALLOW_LOW_ACCESS_TOOLS=true`. Inputs: *(none)*. [skill](skills/ssh-host-reload/SKILL.md)
+- **`ssh_host_notes_append`** — Append a timestamped Markdown entry to the LLM's per-host memory sidecar at `<SSH_HOST_NOTES_DIR>/<alias>.md` ([INC-055](INCIDENTS.md)). Use to record durable lessons future sessions should inherit ("`deploy@` in docker group", "operator rejected `apt install apache2`", "logs go to `/var/log/myapp/access.log` NOT `.log.access`"). Atomic temp+rename on local FS; capped at `SSH_HOST_NOTES_MAX_BYTES`. `ALLOW_LOW_ACCESS_TOOLS=true`. Inputs: `host`, `entry`. [skill](skills/ssh-host-notes-append/SKILL.md)
+- **`ssh_host_notes_set`** — Replace the entire agent-notes sidecar verbatim. Use to consolidate accumulated notes (read via `ssh_host_notes` first, prune stale entries, restructure, write back) or reset memory. Empty string clears the file to zero bytes. Atomic; same cap. `ALLOW_LOW_ACCESS_TOOLS=true`. Inputs: `host`, `content`. [skill](skills/ssh-host-notes-set/SKILL.md)
 
 ## Sessions (`group:session`)
 
 - **`ssh_session_list`** — List open pooled SSH connections. Inputs: *(none)*. [skill](skills/ssh-session-list/SKILL.md)
-- **`ssh_session_stats`** — Pool-level stats: open count, per-key idle time. Inputs: *(none)*. [skill](skills/ssh-session-stats/SKILL.md)
 
 ## SFTP reads (`group:sftp-read`)
 
@@ -173,15 +180,15 @@ All paths canonicalized via remote `realpath -m` and verified inside `path_allow
 
 ## Docker (read) (`group:docker`)
 
-- **`ssh_docker_ps`** — List containers. `Labels` field stripped by default to protect LLM context (set `include_labels=True` to keep). Inputs: `host`, `all_` (False), `include_labels` (False). [skill](skills/ssh-docker-ps/SKILL.md)
+- **`ssh_docker_ps`** — List containers. `Labels` field stripped by default to protect LLM context (set `include_labels=True` to keep). Filter kwargs map to `--filter`: `name` (substring match, `[A-Za-z0-9][A-Za-z0-9_.-]*`), `status` (`created`/`running`/`paused`/`restarting`/`exited`/`dead`), `label` (bare key or `key=value`; k8s-style keys with `/` accepted), `ancestor` (image name, same regex as `name`). All filters validated before I/O. Inputs: `host`, `all_` (False), `include_labels` (False), `name` (None), `status` (None), `label` (None), `ancestor` (None). [skill](skills/ssh-docker-ps/SKILL.md)
 - **`ssh_docker_logs`** — Container logs with aggressive context guards: `tail` default 50 (max 10000), `max_bytes` default 64 KiB (range 1 KiB..10 MiB). Inputs: `host`, `container`, `tail`, `since`, `timestamps`, `max_bytes`. [skill](skills/ssh-docker-logs/SKILL.md)
 - **`ssh_docker_inspect`** — Inspect a docker object (`container`/`image`/`network`/`volume`). Inputs: `host`, `target`, `kind`. [skill](skills/ssh-docker-inspect/SKILL.md)
 - **`ssh_docker_stats`** — One-shot resource snapshot via `docker stats --no-stream`. Inputs: `host`. [skill](skills/ssh-docker-stats/SKILL.md)
 - **`ssh_docker_top`** — Process list inside a container (`docker top`). Plain `ps`-style text in `stdout` (no JSON format at the docker level). `ps_options` accepts extra argv (`-eo pid,user,comm`); shell metacharacters rejected. Inputs: `host`, `container`, `ps_options`. [skill](skills/ssh-docker-top/SKILL.md)
 - **`ssh_docker_events`** — Daemon event stream over a bounded time window (`docker events --since <since> --until <until> --format '{{json .}}'`). Answers "what just happened?" in one call: OOM kills, restarts, health transitions, image pulls. `since` / `until` accept relative (`10m`), epoch, RFC3339, or `now`; `filters` = `["container=nginx", "event=die"]`. Inputs: `host`, `since` (default `"10m"`), `until` (default `"now"`), `filters`. [skill](skills/ssh-docker-events/SKILL.md)
 - **`ssh_docker_volumes`** — List volumes (`docker volume ls --format '{{json .}}'`) or inspect one by name (`docker volume inspect -- <name>`). Use before any `ssh_docker_prune(scope="volume")` decision — named volumes often carry application state. Inputs: `host`, `name` (optional; None = list, set = inspect). [skill](skills/ssh-docker-volumes/SKILL.md)
-- **`ssh_docker_images`** — List local images. `Labels` stripped by default. Inputs: `host`, `include_labels` (False). [skill](skills/ssh-docker-images/SKILL.md)
-- **`ssh_docker_compose_ps`** — List compose-project services. `Labels` stripped by default. `compose_file` path-allowlist-checked. Inputs: `host`, `compose_file`, `include_labels` (False). [skill](skills/ssh-docker-compose-ps/SKILL.md)
+- **`ssh_docker_images`** — List local images. `Labels` stripped by default. Filter kwargs map to `--filter`: `reference` (glob-style image ref, supports `*`/`?`/digests, e.g. `ghcr.io/org/*:*`), `dangling` (bool; `True`=untagged only, `False`=tagged only), `label` (same form as `ssh_docker_ps`). All filters validated before I/O. Inputs: `host`, `include_labels` (False), `reference` (None), `dangling` (None), `label` (None). [skill](skills/ssh-docker-images/SKILL.md)
+- **`ssh_docker_compose_ps`** — List compose-project services. `Labels` stripped by default. `compose_file` path-allowlist-checked. Filter kwargs: `service` (trailing positional, narrows to one compose service; same name regex as containers), `status` (`paused`/`restarting`/`removing`/`running`/`dead`/`created`/`exited`; note `removing` is compose-only). `--filter status=` is placed before the positional service name. Inputs: `host`, `compose_file`, `include_labels` (False), `service` (None), `status` (None). [skill](skills/ssh-docker-compose-ps/SKILL.md)
 - **`ssh_docker_compose_logs`** — Compose logs with same context guards as `ssh_docker_logs`. Inputs: `host`, `compose_file`, `tail`, `service`, `max_bytes`. [skill](skills/ssh-docker-compose-logs/SKILL.md)
 
 ## systemctl (read) (`group:systemctl`)
@@ -199,6 +206,14 @@ All 8 tools carry `tags={"safe", "read", "group:systemctl"}` and `version="1.0"`
 - **`ssh_systemctl_cat`** — Raw unit file contents (`systemctl cat <unit>`). Output is prefixed with `# /path/to/unit` per section. Useful for diffing unit drift between hosts without SFTP. Inputs: `host`, `unit`. [skill](skills/ssh-systemctl-cat/SKILL.md)
 - **`ssh_journalctl`** — Bounded journal read (`journalctl -u <unit> --no-pager -n <lines>`). `since` / `until` accept systemd.time(7) vocabulary: relative (`10m`, `2h`, `30d`, `1w`, `6M`, `1y`), epoch, RFC3339, short date, or keywords (`yesterday`/`today`/`now`). `lines` capped at 1000. `grep` conservative-allowlist validated. **Caveat:** on hosts where the SSH user is not in `systemd-journal` or `adm`, the journal may be empty / permission-denied — fall through to `ssh_sudo_exec journalctl -u <unit>` when needed. Inputs: `host`, `unit`, `since` (None), `until` (None), `lines` (200), `grep` (None). [skill](skills/ssh-journalctl/SKILL.md)
 
+## Package management (read) (`group:pkg`)
+
+All three tools probe for `apt` via `command -v apt` before invoking any APT binary. Hosts without `apt` (non-Debian distros, Windows targets) receive a clean `PlatformNotSupported` error. Pattern and package-name arguments are argv-validated — no shell metacharacters accepted. All three carry `tags={"safe", "read", "group:pkg"}`. POSIX-only.
+
+- **`ssh_apt_list`** — List APT packages filtered by mode and optional glob. `mode` ∈ `{"installed", "upgradable", "all"}`. Maps to `apt list --installed` / `--upgradable` / no flag. Narrow wide queries with `pattern` (e.g. `nginx*`) to avoid stdout-cap truncation. Returns `AptListResult` with `packages[]`, `total`, `truncated`, `output_warnings`. Inputs: `host`, `mode`, `pattern` (optional). [skill](skills/ssh-apt-list/SKILL.md)
+- **`ssh_apt_search`** — Search package names AND descriptions via `apt-cache search`. Returns name + short description per match. Use when you know what a tool does but not what the package is called. Returns `AptSearchResult` with `results[]`, `output_warnings`. Inputs: `host`, `pattern`. [skill](skills/ssh-apt-search/SKILL.md)
+- **`ssh_apt_show`** — Combined `apt-cache show` + `apt-cache policy` for one package in a single call. Returns `installed_version`, `candidate_version`, `repos[]`, `description`, `depends[]`, `recommends[]`, `suggests[]`, `conflicts[]`, `breaks[]`, `replaces[]`, `output_warnings`. Use for pre-upgrade audits and dependency-conflict diagnosis. Inputs: `host`, `package`. [skill](skills/ssh-apt-show/SKILL.md)
+
 ## Persistent shell (read) (`group:shell`)
 
 - **`ssh_shell_list`** — List open persistent sessions with cwd + idle age. Inputs: *(none)*. [skill](skills/ssh-shell-list/SKILL.md)
@@ -207,7 +222,7 @@ All 8 tools carry `tags={"safe", "read", "group:systemctl"}` and `version="1.0"`
 
 # Low-access tier (`ALLOW_LOW_ACCESS_TOOLS=true`)
 
-SFTP-mediated mutations + bounded docker container lifecycle. Path-bearing tools route every path through `canonicalize_and_check`. Never invoke arbitrary shell.
+SFTP-mediated mutations + bounded docker container lifecycle. Path-bearing tools route every path through `resolve_path` (which bundles `canonicalize_and_check` + `check_not_restricted`). Never invoke arbitrary shell.
 
 ```toml
 # hosts.toml
@@ -230,14 +245,16 @@ All write paths use atomic `tmp + posix_rename`. Source / destination paths are 
 - **`ssh_delete_folder`** — Remove a directory. `recursive=False` requires empty (rmdir). `recursive=True` SFTP-walks with cap `SSH_DELETE_FOLDER_MAX_ENTRIES`, falls back to `rm -rf --` for huge trees. `dry_run=True` returns the would-delete list without touching anything. Inputs: `host`, `path`, `recursive`, `dry_run`. [skill](skills/ssh-delete-folder/SKILL.md)
 - **`ssh_cp`** — Copy a file via `cp -a -- src dst` (fixed argv, no shell). Inputs: `host`, `src`, `dst`. [skill](skills/ssh-cp/SKILL.md)
 - **`ssh_mv`** — Move/rename a file. SFTP `posix_rename` first; falls back to `mv --` for cross-filesystem. Inputs: `host`, `src`, `dst`. [skill](skills/ssh-mv/SKILL.md)
-- **`ssh_upload`** — Atomic upload (`<path>.ssh-mcp-tmp.<hex>` + `posix_rename`). Payload base64-encoded, capped at `SSH_UPLOAD_MAX_FILE_BYTES`. Inputs: `host`, `path`, `content_base64`, `mode` (octal). [skill](skills/ssh-upload/SKILL.md)
+- **`ssh_link`** — Create a hard or symbolic link from `src` to `dst`. **Hard linking is O(1) — prefer over `ssh_cp` for big files on the same volume.** Three modes: (a) default `symbolic=False, follow_symlinks=True` (like `ln -L`) — pure SFTP `link()`, link points at src's resolved target if src is a symlink; (b) `symbolic=False, follow_symlinks=False` (like `ln -P --physical`) — hard link to the symlink itself; SFTP can't express this so it shells out to `ln -P -- <src> <dst>` (low-access tier; doesn't need `ln` allowlisted); (c) `symbolic=True` (like `ln -s`) — pure SFTP `symlink()`, src stored verbatim; `follow_symlinks` ignored per GNU `ln`. Both sides path-validated: dst canonicalized; hard-link-`-L` src canonicalized; hard-link-`-P` src parent-canonicalize + `lstat`; symbolic src validated as a path string (relative resolved against dst's parent, normalized via `posixpath.normpath`, then allowlist + restricted-paths check — dangling targets allowed, NUL bytes rejected). No `-f` (force) — use `ssh_delete` first to overwrite ([INC-056](INCIDENTS.md)). Inputs: `host`, `src`, `dst`, `symbolic` (False), `follow_symlinks` (True). [skill](skills/ssh-link/SKILL.md)
+- **`ssh_upload`** — Create or replace a file atomically (`<path>.ssh-mcp-tmp.<hex>` + `posix_rename`). **Use this instead of `ssh_exec_run` for `cat > path <<EOF` / `tee` / `echo > path` / `printf > path`** — atomic, path-policy-checked, audited. Pass exactly one of `content_text` (plain UTF-8; configs/scripts/code) or `content_base64` (binary-safe). Capped at `SSH_UPLOAD_MAX_FILE_BYTES`. Inputs: `host`, `path`, `content_text` (one-of), `content_base64` (one-of), `mode` (octal). [skill](skills/ssh-upload/SKILL.md)
 - **`ssh_edit`** — Structured edit: replace `old_string` with `new_string` atomically. `mode="single"` (default) errors on duplicate or missing match; `mode="all"` replaces every occurrence. Inputs: `host`, `path`, `old_string`, `new_string`, `mode`. [skill](skills/ssh-edit/SKILL.md)
 - **`ssh_patch`** — Apply a unified diff atomically. Rejects on context or removal mismatch (no fuzzy fallback). Inputs: `host`, `path`, `unified_diff`. [skill](skills/ssh-patch/SKILL.md)
-- **`ssh_deploy`** — Atomic upload with optional pre-deploy backup. If `backup=True` and the file exists, `posix_rename` to `<path>.bak-<UTC-iso8601>` before writing. Inputs: `host`, `path`, `content_base64`, `mode`, `backup` (True). [skill](skills/ssh-deploy/SKILL.md)
+- **`ssh_deploy`** — `ssh_upload` + auto-backup. If `backup=True` and the file exists, `posix_rename` to `<path>.bak-<UTC-iso8601>` before writing. Same `content_text` / `content_base64` payload semantics as `ssh_upload`. Inputs: `host`, `path`, `content_text` (one-of), `content_base64` (one-of), `mode`, `backup` (True). [skill](skills/ssh-deploy/SKILL.md)
+- **`ssh_transfer`** — Copy a file from one remote host to another by streaming SFTP through the MCP server. Neither host needs outbound SSH to the other -- works in firewalled inter-host topologies where direct A->B SSH is blocked ([INC-052](INCIDENTS.md)). Both endpoints route through `resolve_path` (canonicalize + allowlist + restricted-zones) independently. Atomic write on the dst (temp + `posix_rename`). Size capped at `SSH_UPLOAD_MAX_FILE_BYTES`. Same-host call rejected -- use `ssh_cp` instead. Throughput bottlenecks at the slower of (src→MCP) and (MCP→dst); for inter-host gigabit when A and B already trust each other, an `scp` via `ssh_exec_run` is faster. Cross-platform via SFTP. Inputs: `src_host`, `src_path`, `dst_host`, `dst_path`, `overwrite` (False). [skill](skills/ssh-transfer/SKILL.md)
 
 ## Docker (lifecycle) (`group:docker`)
 
-Container start/stop/restart and the parallel compose subcommands. Container names are regex-validated; compose file paths go through `canonicalize_and_check`.
+Container start/stop/restart and the parallel compose subcommands. Container names are regex-validated; compose file paths go through `resolve_path` (canonicalize + allowlist + restricted-zones).
 
 - **`ssh_docker_start`** / **`ssh_docker_stop`** / **`ssh_docker_restart`** — `docker start|stop|restart -- <container>`. Inputs: `host`, `container`. [start](skills/ssh-docker-start/SKILL.md) · [stop](skills/ssh-docker-stop/SKILL.md) · [restart](skills/ssh-docker-restart/SKILL.md)
 - **`ssh_docker_compose_start`** / **`ssh_docker_compose_stop`** / **`ssh_docker_compose_restart`** — `compose -f <file> start|stop|restart`. Inputs: `host`, `compose_file`. [start](skills/ssh-docker-compose-start/SKILL.md) · [stop](skills/ssh-docker-compose-stop/SKILL.md) · [restart](skills/ssh-docker-compose-restart/SKILL.md)
@@ -272,6 +289,7 @@ persistent_session = true                          # default — false to deny s
   - **Prefer dedicated tools** when one fits — see the mapping table in the skill (`mkdir -p ... -> ssh_mkdir`, `cat ... -> ssh_sftp_download`, `docker ... -> ssh_docker_*`, `sudo ... -> ssh_sudo_exec`, ...). Wrappers are safer, faster, and audit cleaner.
 - **`ssh_exec_script`** — Run a multi-line script body via stdin to `sh -s --`. Body never appears in argv, process listings, or audit lines. **No allowlist check** on the script body. Inputs: `host`, `script`, `timeout`. [skill](skills/ssh-exec-script/SKILL.md)
 - **`ssh_exec_run_streaming`** — Long-running variant. Streams stdout/stderr tails to FastMCP's progress channel. Backed by `TaskConfig(mode="optional")` — clients may treat it synchronously for short commands or as a background task. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-exec-run-streaming/SKILL.md)
+- **`ssh_broadcast`** — Run the same command on multiple pre-configured hosts in parallel. Each host's `command_allowlist` and `platform` are checked independently; one host's failure does NOT abort the others. Hard cap of 50 hosts per call. Returns `{command, results{alias→ExecResult}, succeeded[], failed[], errors{alias→exc-class}, elapsed_ms}`. Unknown / blocked aliases raise up front; per-host transport / allowlist / platform errors are captured in `errors`. Audit line records `host="?"` (fan-out); the result body is the durable record of what ran where. Inputs: `hosts[]`, `command`, `timeout`. [skill](skills/ssh-broadcast/SKILL.md)
 
 ## Docker (mutating) (`group:docker`)
 
@@ -331,7 +349,7 @@ These apply to all tools — worth knowing before you call anything.
 | **Docker host-escape** | `ALLOW_DOCKER_PRIVILEGED` (default false) | `ssh_docker_run` rejects `--privileged`, `--cap-add`, host-namespace flags, host-root volume mounts ([INC-022](INCIDENTS.md)). |
 | **Docker CLI binary** | `SSH_DOCKER_CMD` (default `docker`) + per-host `docker_cmd` in hosts.toml | Switch to `podman` (or any Docker-compatible CLI) globally or per-host. `SSH_DOCKER_COMPOSE_CMD` derives as `{docker_cmd} compose` unless explicitly overridden. |
 | **Persistent sessions** | `ALLOW_PERSISTENT_SESSIONS` + per-host `persistent_session` | Both must be true to allow `ssh_shell_open` / `ssh_shell_exec`. |
-| **Audit log** | `ssh_mcp.audit` logger | One JSON line per dangerous / low-access / sudo call. Paths + commands SHA-256 hashed; `error` field is exception class only ([INC-008](INCIDENTS.md)). |
+| **Audit log** | `ssh_mcp.audit` logger | One JSON line per tool call (all tiers: `read` / `low-access` / `dangerous` / `sudo`). Paths + commands SHA-256 hashed; `error` field is exception class only ([INC-008](INCIDENTS.md)). |
 | **Hooks** | `SSH_HOOKS_MODULE` | Operator-supplied module exposing `register_hooks(registry)`. Events: STARTUP / SHUTDOWN / PRE_TOOL_CALL / POST_TOOL_CALL. Side-effect only. |
 | **BM25 search** | `SSH_ENABLE_BM25` | Replace tools/list with `search_tools` + `call_tool` for large catalogs ([ADR-0020](DECISIONS.md)). |
 | **Output caps** | `SSH_STDOUT_CAP_BYTES` / `SSH_STDERR_CAP_BYTES` (1 MiB) | Truncate at the cap; `*_truncated` flag flips true. Docker logs default to a tighter 64 KiB. |

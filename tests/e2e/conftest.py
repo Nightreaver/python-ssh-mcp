@@ -205,7 +205,9 @@ async def _probe_capability(pool: ConnectionPool, policy: HostPolicy, argv: list
     try:
         import shlex
 
-        conn = await pool.acquire(policy)
+        from ssh_mcp.models.policy import ResolvedHost
+
+        conn = await pool.acquire(ResolvedHost(hostname=policy.hostname, policy=policy))
         result = await conn.run(shlex.join(argv), check=False, timeout=10)
         return result.exit_status == 0
     except Exception:

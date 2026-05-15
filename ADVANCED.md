@@ -100,7 +100,7 @@ is wired and fires events, but no hooks are registered by default. You add them.
 |---|---|---|
 | `STARTUP` | once after the pool + host registry are ready | yes (lifespan waits) |
 | `SHUTDOWN` | once before the pool closes | yes |
-| `PRE_TOOL_CALL` | before every `@audited` tool (mutating tier) | no |
+| `PRE_TOOL_CALL` | before every `@audited` tool (all tiers, including read) | no |
 | `POST_TOOL_CALL` | after every `@audited` tool (includes errors + duration) | no |
 
 Non-blocking events are scheduled as background tasks; the main flow returns
@@ -142,9 +142,7 @@ for the full registry API.
 - **Python only.** No shell-command hooks (Claude Code style) yet. A
   `ShellCommandHook` adapter over `asyncio.create_subprocess_exec` would slot
   into the same registry later.
-- **Mutating tools only.** `PRE/POST_TOOL_CALL` emit from the `@audited`
-  decorator, which only wraps low-access/dangerous/sudo tools. Read-only tools
-  don't fire hooks; extend to all tools if you need full observability.
+- **All tiers.** `PRE/POST_TOOL_CALL` emit from the `@audited` decorator, which wraps every tool including read-tier tools (since v1.4.0). Operators who want to exclude read-tier events from hook processing can filter on `ctx.tier == "read"` in their hook implementation.
 
 ---
 
@@ -152,7 +150,7 @@ for the full registry API.
 
 ### Audit log
 
-The `ssh_mcp.audit` logger emits **one JSON line per mutating tool call**:
+The `ssh_mcp.audit` logger emits **one JSON line per tool call** (all tiers — `read`, `low-access`, `dangerous`, `sudo`):
 
 ```json
 {

@@ -114,6 +114,15 @@ class HostPolicy(BaseModel):
     # `docker`). When set, the compose prefix derives from this (unless the
     # operator also sets SSH_DOCKER_COMPOSE_CMD explicitly).
     docker_cmd: str | None = None
+    # INC-055: free-form operator notes the LLM should consult before doing
+    # anything substantive on this host. Markdown-friendly multi-line string
+    # in `hosts.toml`. Surfaced verbatim by `ssh_host_notes` and listed by
+    # `ssh_host_list`. The MCP server NEVER mutates this field -- it's
+    # operator-controlled, by design (the trust root is the operator's
+    # `hosts.toml`, not the agent). Typical content: "never install apache2",
+    # "logs ship to /var/log/myapp -- do NOT change rotation policy",
+    # "owner: platform-team@; page #ops-platform on changes".
+    notes: str | None = None
 
     @field_validator("platform", mode="before")
     @classmethod
@@ -168,3 +177,32 @@ class HostPolicy(BaseModel):
         if isinstance(self.proxy_jump, str):
             return [self.proxy_jump]
         return list(self.proxy_jump)
+
+
+class ResolvedHost(BaseModel):
+    """A `HostPolicy` paired with its canonical hostname after resolution.
+
+    The point is type-system clarity: once a tool has called
+    `services.host_policy.resolve()` to map a user-facing alias to a policy,
+    the value is no longer "some string the LLM sent" -- it's the canonical
+    hostname we will actually open a TCP/SSH connection to (per ADR-0019).
+    Functions deeper in the call stack can take a `ResolvedHost` and know
+    the resolution + blocklist check has already happened.
+
+    `hostname` mirrors `policy.hostname` (kept on the wrapper so callers can
+    say `resolved.hostname` without reaching into the policy). Equality,
+    immutability, and field rejection are pydantic-frozen + extra="forbid".
+    The MCP-facing surface still takes `host: str`; the value type lives
+    downstream of resolution and is never exposed to clients.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Canonical post-resolution hostname (= policy.hostname). Stored on the
+    # wrapper so call sites that only need the hostname don't have to reach
+    # into the policy.
+    hostname: str
+    # The full per-host policy. Internals that consume HostPolicy (transport,
+    # path/exec/host policy gates) keep their HostPolicy signatures; tools
+    # unwrap `.policy` at the call boundary.
+    policy: HostPolicy

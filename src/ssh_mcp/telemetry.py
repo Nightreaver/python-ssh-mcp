@@ -13,6 +13,7 @@ Usage:
         result = await conn.run(argv)
         s.set_attribute("ssh.exit_code", result.exit_status)
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -25,9 +26,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SECRET_FLAG_RE = re.compile(
-    r"(?i)^(--)?(password|token|secret|passwd|pwd|auth|api[-_]?key)=", re.IGNORECASE
-)
+_SECRET_FLAG_RE = re.compile(r"(?i)^(--)?(password|token|secret|passwd|pwd|auth|api[-_]?key)=", re.IGNORECASE)
 
 
 @contextlib.contextmanager
@@ -72,7 +71,7 @@ def redact_argv(argv: list[str]) -> list[str]:
 # when it works, re-quoting via shlex.quote rewrites the operator's input in a
 # way that breaks audit-line readability for non-secret arguments.
 _SECRET_INLINE_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_-])"           # boundary: not part of a longer token
+    r"(?i)(?<![A-Za-z0-9_-])"  # boundary: not part of a longer token
     r"((?:--)?(?:password|token|secret|passwd|pwd|auth|api[-_]?key)=)"
     r"(\S+)",
 )
@@ -94,6 +93,15 @@ def redact_command_string(command: str) -> str:
 
 
 def _get_tracer() -> Any:
+    # Operator gate: when OTEL_ENABLED=false (or unset to false), short-circuit
+    # before touching the fastmcp.telemetry import path. Keeps spans truly
+    # opt-out: no tracer object, no attributes set, no per-call overhead beyond
+    # the settings lookup. The boolean lives on the singleton `settings`
+    # imported lazily so this module stays import-cheap.
+    from .config import settings
+
+    if not settings.OTEL_ENABLED:
+        return None
     try:
         from fastmcp.telemetry import get_tracer  # type: ignore[import-not-found]
 

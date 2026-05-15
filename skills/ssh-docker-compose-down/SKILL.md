@@ -11,12 +11,14 @@ networks (unless external). `volumes=True` also removes named volumes --
 **this is destructive** and will delete persistent data such as database
 contents. Path-confined.
 
+A compose YAML is *executed* (mounts volumes, declares ports, runs init commands), so its file-path is policy-gated the same way read/write paths are.
+
 ## Inputs
 
 | name | type | required | default | notes |
 |---|---|---|---|---|
 | `host` | str | yes | -- | Alias |
-| `compose_file` | str | yes | -- | Absolute; in `path_allowlist` |
+| `compose_file` | str | yes | -- | Absolute; in `path_allowlist` and outside `restricted_paths` |
 | `volumes` | bool | no | False | Delete named volumes (DATA LOSS) |
 | `timeout` | int | no | `SSH_COMMAND_TIMEOUT` | |
 | `compose_v1` | bool | no | False | Use legacy `docker-compose` binary -- see [compose_v1 explainer](../ssh-docker-compose-up/SKILL.md#compose-v1-vs-v2-compose_v1-switch) |
@@ -44,6 +46,7 @@ ssh_docker_compose_down(host="docker1", compose_file="/opt/app/docker-compose.ym
 ## Common failures
 
 - `PathNotAllowed` -- compose_file outside allowlist.
+- `PathRestricted` -- compose_file inside a restricted zone (e.g. SMB mount, NFS share).
 - Orphan containers not removed -- use `docker rm` manually or `compose_up --remove-orphans`
   before this.
 

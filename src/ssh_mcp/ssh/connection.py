@@ -1,4 +1,5 @@
 """Open asyncssh connections honoring HostPolicy. ProxyJump handled recursively."""
+
 from __future__ import annotations
 
 import logging
@@ -46,7 +47,11 @@ async def open_connection(
             hop_policy = pool.host(hop_name)
             if hop_policy is None:
                 raise ConnectError(f"proxy_jump hop {hop_name!r} not in hosts.toml")
-            tunnel = await pool.acquire(hop_policy)
+            # Bastion hops come from the in-memory hosts registry (already
+            # canonical, loaded from hosts.toml at startup) -- not user input
+            # routed through `host_policy.resolve`. Skip the ResolvedHost
+            # wrapper and call `acquire_policy` directly.
+            tunnel = await pool.acquire_policy(hop_policy)
 
     return await _open_single(policy, settings, known_hosts, tunnel)
 
@@ -114,7 +119,9 @@ async def _open_single(
             # out-of-band. Placeholder is an explicit sentence, not a magic-string
             # literal that might read like a bad f-string substitution.
             raise HostKeyMismatch(
-                policy.hostname, expected, "unknown (asyncssh did not expose the received key)",
+                policy.hostname,
+                expected,
+                "unknown (asyncssh did not expose the received key)",
             ) from exc
         except asyncssh.ChannelOpenError as exc:
             raise ConnectError(str(exc)) from exc
@@ -142,9 +149,7 @@ async def _resolve_auth(auth: AuthPolicy) -> dict[str, Any]:
                 pass
         elif auth.identities_only:
             # identities_only without a fingerprint makes no sense for agent auth.
-            raise AuthenticationFailed(
-                "identities_only=true requires identity_fingerprint for agent auth"
-            )
+            raise AuthenticationFailed("identities_only=true requires identity_fingerprint for agent auth")
         return kwargs
 
     if auth.method == "key":
@@ -178,7 +183,5 @@ def _run_command_for_secret(cmd: str) -> str:
         check=False,
     )
     if result.returncode != 0:
-        raise AuthenticationFailed(
-            f"secret command exited {result.returncode} (stderr hidden for safety)"
-        )
+        raise AuthenticationFailed(f"secret command exited {result.returncode} (stderr hidden for safety)")
     return result.stdout.rstrip("\n")

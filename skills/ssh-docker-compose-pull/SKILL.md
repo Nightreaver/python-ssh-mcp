@@ -10,12 +10,14 @@ Runs `<compose> -f <file> pull`. Fetches the latest images defined in the
 project file. Running services are not affected until `compose_up` /
 `compose_restart`. Path-confined.
 
+A compose YAML is *executed* (mounts volumes, declares ports, runs init commands), so its file-path is policy-gated the same way read/write paths are.
+
 ## Inputs
 
 | name | type | required | default | notes |
 |---|---|---|---|---|
 | `host` | str | yes | -- | Alias |
-| `compose_file` | str | yes | -- | Absolute; in `path_allowlist` |
+| `compose_file` | str | yes | -- | Absolute; in `path_allowlist` and outside `restricted_paths` |
 | `timeout` | int | no | `SSH_COMMAND_TIMEOUT` | Raise for large images |
 | `compose_v1` | bool | no | False | Use legacy `docker-compose` binary -- see [compose_v1 explainer](../ssh-docker-compose-up/SKILL.md#compose-v1-vs-v2-compose_v1-switch) |
 
@@ -46,6 +48,8 @@ ssh_docker_compose_pull(
 
 ## Common failures
 
+- `PathNotAllowed` -- compose_file outside allowlist.
+- `PathRestricted` -- compose_file inside a restricted zone (e.g. SMB mount, NFS share).
 - Registry timeout -- raise `timeout`.
 - `denied` on private registries -- docker login out-of-band.
 

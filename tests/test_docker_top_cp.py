@@ -24,10 +24,10 @@ from ssh_mcp.tools.docker import lifecycle_tools
 from ssh_mcp.tools.docker_tools import ssh_docker_cp, ssh_docker_top
 
 # INC-043: `ssh_docker_cp` lives in `docker.lifecycle_tools` after the split.
-# Monkeypatches targeting `_run_docker` / `canonicalize_and_check` /
-# `check_not_restricted` MUST target that submodule rather than the
-# `docker_tools` facade -- re-export aliases don't intercept the module-level
-# name lookup inside the tool body.
+# Monkeypatches targeting `_run_docker` / `resolve_path` MUST target that
+# submodule rather than the `docker_tools` facade -- re-export aliases don't
+# intercept the module-level name lookup inside the tool body. `resolve_path`
+# bundles canonicalize + restricted-path checks; patching it covers both.
 
 
 class _Ctx:
@@ -141,11 +141,11 @@ def _stub_ctx_for_cp() -> Any:
 async def test_cp_from_container_builds_correct_argv(monkeypatch) -> None:
     """Drive the from_container path past validation + path-policy and capture
     the argv that lands at `_run_docker`. This test would have failed at
-    NameError if `effective_restricted_paths` / `check_not_restricted` were
-    missing from the imports (INCIDENTS INC-029)."""
+    NameError if `resolve_path` were missing from the imports (INCIDENTS
+    INC-029)."""
     captured: dict[str, Any] = {}
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, _policy, _settings, **_kw):
         return path  # pretend it resolves to itself
 
     async def fake_run_docker(_ctx, _host, argv, **kw):
@@ -153,7 +153,7 @@ async def test_cp_from_container_builds_correct_argv(monkeypatch) -> None:
         captured["kwargs"] = kw
         return {"stdout": "", "stderr": "", "exit_code": 0}
 
-    monkeypatch.setattr(lifecycle_tools, "canonicalize_and_check", fake_canonicalize)
+    monkeypatch.setattr(lifecycle_tools, "resolve_path", fake_resolve)
     monkeypatch.setattr(lifecycle_tools, "_run_docker", fake_run_docker)
 
     ctx, _pool = _stub_ctx_for_cp()
@@ -174,14 +174,14 @@ async def test_cp_to_container_builds_correct_argv(monkeypatch) -> None:
     """Mirror happy-path test for the other direction."""
     captured: dict[str, Any] = {}
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, _policy, _settings, **_kw):
         return path
 
     async def fake_run_docker(_ctx, _host, argv, **kw):
         captured["argv"] = argv
         return {"stdout": "", "stderr": "", "exit_code": 0}
 
-    monkeypatch.setattr(lifecycle_tools, "canonicalize_and_check", fake_canonicalize)
+    monkeypatch.setattr(lifecycle_tools, "resolve_path", fake_resolve)
     monkeypatch.setattr(lifecycle_tools, "_run_docker", fake_run_docker)
 
     ctx, _pool = _stub_ctx_for_cp()
@@ -199,23 +199,22 @@ async def test_cp_to_container_builds_correct_argv(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_cp_calls_restricted_path_check(monkeypatch) -> None:
-    """Defense-in-depth: the cp body MUST invoke check_not_restricted on the
-    canonicalized host path. If the import for that helper goes missing, this
-    test fails at AttributeError on the monkeypatched callable. Catches the
-    same class of bug as B1 from a different angle."""
+    """Defense-in-depth: the cp body MUST invoke `resolve_path` on the
+    host_path so the canonicalize + restricted-zone chain runs together.
+    `resolve_path` bundles `canonicalize_and_check` + `check_not_restricted`;
+    if the import is dropped, this test fails at AttributeError on the
+    monkeypatched callable. Catches the same class of bug as B1 from a
+    different angle."""
     calls: list[Any] = []
 
-    async def fake_canonicalize(_conn, path, _allowlist, **_kw):
+    async def fake_resolve(_conn, path, policy, _settings, *, must_exist=True):
+        calls.append((path, must_exist, policy.platform))
         return path
-
-    def fake_check_not_restricted(canonical, restricted, platform):
-        calls.append((canonical, list(restricted), platform))
 
     async def fake_run_docker(_ctx, _host, argv, **kw):
         return {"stdout": "", "stderr": "", "exit_code": 0}
 
-    monkeypatch.setattr(lifecycle_tools, "canonicalize_and_check", fake_canonicalize)
-    monkeypatch.setattr(lifecycle_tools, "check_not_restricted", fake_check_not_restricted)
+    monkeypatch.setattr(lifecycle_tools, "resolve_path", fake_resolve)
     monkeypatch.setattr(lifecycle_tools, "_run_docker", fake_run_docker)
 
     ctx, _pool = _stub_ctx_for_cp()
@@ -229,6 +228,7 @@ async def test_cp_calls_restricted_path_check(monkeypatch) -> None:
     )
 
     assert len(calls) == 1
-    canonical, _restricted, platform = calls[0]
-    assert canonical == "/opt/app/x"
+    path, must_exist, platform = calls[0]
+    assert path == "/opt/app/x"
+    assert must_exist is False  # from_container: dst on host, may not exist
     assert platform == "posix"

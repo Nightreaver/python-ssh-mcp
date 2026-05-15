@@ -31,6 +31,37 @@ class Settings(BaseSettings):
     ALLOW_PASSWORD_AUTH: bool = False
     SSH_SKILLS_DIR: Path | None = Path("skills")
 
+    # Per-host agent-written memory (INC-055). Sidecar markdown files at
+    # `<dir>/<alias>.md` that the LLM appends to via ssh_host_notes_append /
+    # replaces via ssh_host_notes_set. Distinct from `hosts.toml`'s `notes`
+    # field, which is the OPERATOR's hard-rule baseline -- the LLM reads
+    # both via ssh_host_notes but only writes the sidecar. Set to None to
+    # disable agent-side notes (read-only operator layer remains).
+    SSH_HOST_NOTES_DIR: Path | None = Path("notes")
+    # Cap on a single agent-notes sidecar file. Default 256 KiB -- generous
+    # for accumulated memory but small enough that an LLM that goes wild
+    # appending can't fill the operator's disk in one session.
+    SSH_HOST_NOTES_MAX_BYTES: int = 256 * 1024
+
+    # INC-059: when True (default), `ssh_host_ping` auto-injects the host's
+    # operator-baseline notes (from hosts.toml's `notes` field) into its
+    # result. Ping is the canonical "I'm starting work on this host" probe;
+    # surfacing hard-rule constraints there means the LLM sees them without
+    # needing to remember an explicit `ssh_host_notes` call -- enforcement
+    # by ergonomics. Set False for tool-execution-only deployments where
+    # ping should stay minimal.
+    SSH_PING_INCLUDES_NOTES: bool = True
+    # INC-060: parallel toggle for the agent layer (the LLM's own
+    # session-spanning sidecar at <SSH_HOST_NOTES_DIR>/<alias>.md).
+    # Default True so the LLM gets its past self's learned facts on
+    # ping too -- without needing an explicit `ssh_host_notes` call.
+    # Trade-off: agent sidecars can grow to SSH_HOST_NOTES_MAX_BYTES
+    # (default 256 KiB) -- if your fleet's notes are large and ping
+    # context inflation matters, set this False and rely on the
+    # explicit tool. Independent of `SSH_PING_INCLUDES_NOTES` so an
+    # operator can toggle the two layers separately.
+    SSH_PING_INCLUDES_AGENT_NOTES: bool = True
+
     # Workflow runbooks — multi-tool procedures (incident response, deploy +
     # verify, integrity audit, ...). Distinct from per-tool skills. Mounted
     # as a separate `SkillsDirectoryProvider` so operators can toggle them
@@ -160,7 +191,6 @@ class Settings(BaseSettings):
     ALLOW_LOW_ACCESS_TOOLS: bool = False
     ALLOW_DANGEROUS_TOOLS: bool = False
     ALLOW_SUDO: bool = False
-    SSH_ALLOW_KNOWN_HOSTS_WRITE: bool = False
 
     # --- Sudo ---
     SSH_SUDO_PASSWORD_CMD: str | None = None
@@ -185,8 +215,17 @@ class Settings(BaseSettings):
         ]
     )
 
+    # --- MCP transport ---
+    # FastMCP transport. `stdio` (default) is what every MCP client launcher
+    # expects. `http` / `streamable-http` / `sse` expose the server over HTTP;
+    # there is NO built-in auth or TLS -- put it behind a reverse proxy with
+    # a bearer token / mTLS before binding to anything other than loopback.
+    MCP_TRANSPORT: Literal["stdio", "http", "streamable-http", "sse"] = "stdio"
+    MCP_HTTP_HOST: str = "127.0.0.1"
+    MCP_HTTP_PORT: int = 8000
+
     # --- Observability ---
-    VERSION: str = "1.0.0"
+    VERSION: str = "1.1.0"
     LOG_LEVEL: str = "INFO"
     OTEL_ENABLED: bool = True
 

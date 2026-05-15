@@ -31,6 +31,20 @@ Any unset field disables that metric.
 
 ## Returns
 
+`HostAlertsResult` -- a typed Pydantic model (`extra="forbid"`):
+
+| field | type | notes |
+|---|---|---|
+| `host` | `str` | canonical hostname |
+| `breaches` | `list[AlertBreach]` | one entry per crossed threshold; empty = all OK |
+| `metrics` | `dict[str, ...]` | raw observations the evaluator used |
+
+Each `AlertBreach` has: `metric` (str), `threshold` (float), `current` (float),
+`severity` (str -- always `"warning"` for now), `detail` (str -- e.g. `"mount=/var"`).
+
+`metrics` carries heterogeneous shapes: `disk_entries` is a list of per-mount
+mappings; `load_avg_1min` and `mem_free_percent` are scalars.
+
 ```json
 {
   "host": "web01.example.com",
@@ -39,7 +53,7 @@ Any unset field disables that metric.
      "severity": "warning", "detail": "mount=/var"}
   ],
   "metrics": {
-    "disk_entries": [{"mount": "/", "use_percent": 42.0}, ...],
+    "disk_entries": [{"mount": "/", "use_percent": 42.0}],
     "load_avg_1min": 0.15,
     "mem_free_percent": 67.3
   }
@@ -47,6 +61,10 @@ Any unset field disables that metric.
 ```
 
 `breaches` empty = all configured thresholds are within limits.
+
+The LLM receives a schema-validated result -- unexpected keys from the server
+are rejected by `extra="forbid"` on both `HostAlertsResult` and `AlertBreach`.
+Typed field access (`.breaches`, `.metrics`) is available in calling code.
 
 ## When to call it
 

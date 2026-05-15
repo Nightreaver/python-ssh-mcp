@@ -4,6 +4,7 @@ Every tool here carries tags={"low-access", "group:file-ops"}. They are
 hidden unless `ALLOW_LOW_ACCESS_TOOLS=true`. SFTP-first; shell fallbacks
 use fixed argv with `--` separators and never string interpolation.
 """
+
 from __future__ import annotations
 
 import base64
@@ -24,9 +25,12 @@ from ..services.audit import audited
 from ..services.edit_service import EditError, PatchError, apply_edit, apply_unified_diff
 from ..services.path_policy import (
     canonicalize_and_check,
+    check_in_allowlist,
     check_not_restricted,
     effective_allowlist,
     effective_restricted_paths,
+    reject_bad_characters,
+    resolve_path,
 )
 from ._context import pool_from, require_posix, resolve_host, settings_from
 
@@ -47,15 +51,10 @@ async def _prepare_existing(
 ) -> tuple[ConnectionPool, HostPolicy, Settings, asyncssh.SSHClientConnection, str]:
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    allowlist = effective_allowlist(policy, settings)
-    canonical = await canonicalize_and_check(
-        conn, path, allowlist, must_exist=True, platform=policy.platform
-    )
-    check_not_restricted(
-        canonical, effective_restricted_paths(policy, settings), policy.platform
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
     return pool, policy, settings, conn, canonical
 
 
@@ -64,15 +63,10 @@ async def _prepare_creatable(
 ) -> tuple[ConnectionPool, HostPolicy, Settings, asyncssh.SSHClientConnection, str]:
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    allowlist = effective_allowlist(policy, settings)
-    canonical = await canonicalize_and_check(
-        conn, path, allowlist, must_exist=False, platform=policy.platform
-    )
-    check_not_restricted(
-        canonical, effective_restricted_paths(policy, settings), policy.platform
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=False)
     return pool, policy, settings, conn, canonical
 
 
@@ -171,9 +165,7 @@ async def ssh_delete(host: str, path: str, ctx: Context) -> WriteResult:
         if stat_module.S_ISDIR(attrs.permissions or 0):
             raise WriteError(f"{canonical!r} is a directory; use ssh_delete_folder")
         await sftp.remove(canonical)
-    return WriteResult(
-        host=_policy.hostname, path=canonical, success=True, message="deleted"
-    )
+    return WriteResult(host=_policy.hostname, path=canonical, success=True, message="deleted")
 
 
 # --------- ssh_delete_folder ---------
@@ -212,9 +204,7 @@ async def ssh_delete_folder(
 
         entries = await _walk_tree(sftp, canonical, cap)
         if len(entries) >= cap:
-            raise WriteError(
-                f"folder would touch >= {cap} entries; raise SSH_DELETE_FOLDER_MAX_ENTRIES"
-            )
+            raise WriteError(f"folder would touch >= {cap} entries; raise SSH_DELETE_FOLDER_MAX_ENTRIES")
 
         if dry_run:
             return {
@@ -231,9 +221,7 @@ async def ssh_delete_folder(
         conn, canonical, allowlist, must_exist=True, platform=policy.platform
     )
     if re_canonical != canonical:
-        raise WriteError(
-            f"path changed between walk and rm -rf: was {canonical!r}, now {re_canonical!r}"
-        )
+        raise WriteError(f"path changed between walk and rm -rf: was {canonical!r}, now {re_canonical!r}")
 
     if policy.platform == "windows":
         # No `rm -rf` shell fallback on Windows; remove each entry via SFTP in
@@ -256,7 +244,9 @@ async def ssh_delete_folder(
                 else:
                     await sftp.remove(entry)
         return WriteResult(
-            host=policy.hostname, path=canonical, success=True,
+            host=policy.hostname,
+            path=canonical,
+            success=True,
             message=f"recursively deleted {len(entries)} entries (SFTP)",
         ).model_dump()
 
@@ -310,19 +300,11 @@ async def ssh_cp(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
     `PlatformNotSupported`; use `ssh_sftp_download` + `ssh_upload` as a
     cross-platform alternative.
     """
-    policy = resolve_host(ctx, host)
-    require_posix(policy, tool="ssh_cp", reason="uses `cp -a`; no cross-platform equivalent wired yet")
+    resolved = resolve_host(ctx, host)
+    require_posix(resolved, tool="ssh_cp", reason="uses `cp -a`; no cross-platform equivalent wired yet")
     pool, policy, settings, conn, src_canonical = await _prepare_existing(ctx, host, src)
-    dst_canonical = await canonicalize_and_check(
-        conn, dst, effective_allowlist(policy, settings),
-        must_exist=False, platform=policy.platform,
-    )
-    check_not_restricted(
-        dst_canonical, effective_restricted_paths(policy, settings), policy.platform,
-    )
-    result = await conn.run(
-        shlex.join(["cp", "-a", "--", src_canonical, dst_canonical]), check=False
-    )
+    dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False)
+    result = await conn.run(shlex.join(["cp", "-a", "--", src_canonical, dst_canonical]), check=False)
     if result.exit_status != 0:
         stderr = result.stderr
         if isinstance(stderr, bytes | bytearray):
@@ -349,13 +331,7 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
     need a separate implementation we haven't written.
     """
     pool, policy, settings, conn, src_canonical = await _prepare_existing(ctx, host, src)
-    dst_canonical = await canonicalize_and_check(
-        conn, dst, effective_allowlist(policy, settings),
-        must_exist=False, platform=policy.platform,
-    )
-    check_not_restricted(
-        dst_canonical, effective_restricted_paths(policy, settings), policy.platform,
-    )
+    dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False)
     async with conn.start_sftp_client() as sftp:
         try:
             await sftp.posix_rename(src_canonical, dst_canonical)
@@ -363,9 +339,7 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
         except asyncssh.SFTPError as exc:
             # EXDEV, permission denied on cross-fs, etc. → shell fallback.
             if _is_cross_device(exc) and policy.platform == "posix":
-                result = await conn.run(
-                    shlex.join(["mv", "--", src_canonical, dst_canonical]), check=False
-                )
+                result = await conn.run(shlex.join(["mv", "--", src_canonical, dst_canonical]), check=False)
                 if result.exit_status != 0:
                     stderr = result.stderr
                     if isinstance(stderr, bytes | bytearray):
@@ -381,6 +355,244 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
         success=True,
         message=f"moved from {src_canonical} ({mode})",
     )
+
+
+# --------- ssh_link ---------
+
+
+@mcp_server.tool(tags={"low-access", "group:file-ops"}, version="1.0")
+@audited(tier="low-access")
+async def ssh_link(
+    host: str,
+    src: str,
+    dst: str,
+    ctx: Context,
+    symbolic: bool = False,
+    follow_symlinks: bool = True,
+) -> WriteResult:
+    """Create a hard or symbolic link from `src` to `dst` on the remote host.
+
+    `symbolic=True` (`ln -s`): create a symbolic link at `dst` whose target
+    text is `src`. Pure SFTP via `sftp.symlink()`. Per GNU `ln`'s "Using -s
+    ignores -L and -P", `follow_symlinks` is silently ignored in this mode.
+    `src` is stored VERBATIM in the symlink (preserves relative-link
+    semantics: `ln -s ../foo bar` keeps `../foo` as the link text).
+
+    `symbolic=False` + `follow_symlinks=True` (default, like `ln -L`):
+    create a hard link. The link points to the inode of src's resolved
+    target. Pure SFTP -- asyncssh's `sftp.link()` invokes the
+    SFTP-HARDLINK extension, which OpenSSH's sftp-server implements via
+    `linkat(... AT_SYMLINK_FOLLOW)`.
+
+    `symbolic=False` + `follow_symlinks=False` (like `ln -P` /
+    `--physical`): hard link to the SYMLINK's own inode, not its target.
+    SFTP can't express "don't follow" for hard links, so this falls back
+    to a shell `ln -P -- <src> <dst>` invocation. Same low-access tier as
+    `ssh_cp` / `ssh_mv` -- doesn't require `ln` in `command_allowlist`.
+
+    PATH POLICY. `dst` is always canonicalized; its parent must exist and
+    be in the allowlist. For `src`:
+
+    - hard link `-L` (default): canonicalized normally (resolves symlinks);
+      the resolved target must be in the allowlist + not restricted.
+    - hard link `-P`: parent-canonicalize + `lstat` (canonicalizing src
+      would defeat `-P`'s point). The check is "the symlink lives in an
+      allowed dir," not "everywhere it could point is allowed."
+    - symbolic link: src is treated as a TARGET STRING, not a real path
+      (POSIX permits dangling symlinks; src may not exist yet). Validated
+      string-wise: relative paths resolved against dst's parent dir,
+      normalized via `posixpath.normpath`, then checked against allowlist
+      + restricted_paths. `reject_bad_characters` rejects NUL / control
+      bytes up front.
+
+    Existing dst raises `SFTPError` (sftp paths) or `WriteError` (shell
+    path); use `ssh_delete` first if you need to overwrite.
+
+    POSIX-only. Windows targets raise `PlatformNotSupported`.
+    """
+    pool = pool_from(ctx)
+    settings = settings_from(ctx)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    require_posix(
+        resolved,
+        tool="ssh_link",
+        reason="POSIX hard / symbolic links via SFTP / `ln`",
+    )
+    conn = await pool.acquire(resolved)
+
+    allowlist = effective_allowlist(policy, settings)
+    restricted = effective_restricted_paths(policy, settings)
+
+    dst_canonical = await canonicalize_and_check(
+        conn,
+        dst,
+        allowlist,
+        must_exist=False,
+        platform=policy.platform,
+    )
+    check_not_restricted(dst_canonical, restricted, policy.platform)
+
+    # Three modes, three different src-validation + creation strategies.
+    # Body is dispatch + WriteResult assembly; the per-mode helpers own
+    # the policy checks and the SFTP / shell call. See per-helper
+    # docstrings for the policy contract specific to each mode.
+    if symbolic:
+        await _create_symbolic_link(
+            conn=conn,
+            src=src,
+            dst_canonical=dst_canonical,
+            allowlist=allowlist,
+            restricted=restricted,
+            platform=policy.platform,
+        )
+        return WriteResult(
+            host=policy.hostname,
+            path=dst_canonical,
+            success=True,
+            message=f"symbolic link -> {src}",
+        )
+
+    if follow_symlinks:
+        src_canonical = await _create_hard_link_followed(
+            conn=conn,
+            src=src,
+            dst_canonical=dst_canonical,
+            allowlist=allowlist,
+            restricted=restricted,
+            platform=policy.platform,
+        )
+        return WriteResult(
+            host=policy.hostname,
+            path=dst_canonical,
+            success=True,
+            message=f"hard link (followed symlinks) -> {src_canonical}",
+        )
+
+    src_full = await _create_hard_link_unfollowed(
+        conn=conn,
+        src=src,
+        dst_canonical=dst_canonical,
+        allowlist=allowlist,
+        restricted=restricted,
+        platform=policy.platform,
+    )
+    return WriteResult(
+        host=policy.hostname,
+        path=dst_canonical,
+        success=True,
+        message=f"hard link (physical, unfollowed symlinks) -> {src_full}",
+    )
+
+
+async def _create_symbolic_link(
+    *,
+    conn: asyncssh.SSHClientConnection,
+    src: str,
+    dst_canonical: str,
+    allowlist: list[str],
+    restricted: list[str],
+    platform: Literal["posix", "windows"],
+) -> None:
+    """`-s` mode: validate src as a path STRING (no realpath, may not
+    exist) and create the symlink via `sftp.symlink()`.
+
+    Relative targets resolve against dst's parent dir for the policy
+    check ONLY -- the on-disk link text is `src` VERBATIM so relative
+    semantics are preserved (`ln -s ../foo bar` keeps `../foo`).
+    """
+    reject_bad_characters(src)
+    if posixpath.isabs(src):
+        target_for_check = posixpath.normpath(src)
+    else:
+        dst_parent = posixpath.dirname(dst_canonical) or "/"
+        target_for_check = posixpath.normpath(posixpath.join(dst_parent, src))
+    check_in_allowlist(target_for_check, allowlist, platform)
+    check_not_restricted(target_for_check, restricted, platform)
+
+    async with conn.start_sftp_client() as sftp:
+        # Pass src VERBATIM -- preserves relative-link semantics on disk.
+        await sftp.symlink(src, dst_canonical)
+
+
+async def _create_hard_link_followed(
+    *,
+    conn: asyncssh.SSHClientConnection,
+    src: str,
+    dst_canonical: str,
+    allowlist: list[str],
+    restricted: list[str],
+    platform: Literal["posix", "windows"],
+) -> str:
+    """`-L` mode (default): canonicalize src normally (resolves symlinks)
+    and create the hard link via `sftp.link()` (SFTP-HARDLINK extension,
+    OpenSSH `linkat(... AT_SYMLINK_FOLLOW)`).
+
+    Returns the canonical src path so the caller can include it in the
+    audit-friendly result message.
+    """
+    src_canonical = await canonicalize_and_check(
+        conn,
+        src,
+        allowlist,
+        must_exist=True,
+        platform=platform,
+    )
+    check_not_restricted(src_canonical, restricted, platform)
+    async with conn.start_sftp_client() as sftp:
+        await sftp.link(src_canonical, dst_canonical)
+    return src_canonical
+
+
+async def _create_hard_link_unfollowed(
+    *,
+    conn: asyncssh.SSHClientConnection,
+    src: str,
+    dst_canonical: str,
+    allowlist: list[str],
+    restricted: list[str],
+    platform: Literal["posix", "windows"],
+) -> str:
+    """`-P` mode: parent-canonicalize, lstat-verify, shell `ln -P --`.
+
+    Canonicalizing src would defeat `-P`'s "don't follow symlinks" point,
+    so we validate via parent-canonicalize + lstat instead -- the check
+    is "the symlink lives in an allowed dir," not "everywhere it could
+    point is allowed." Returns the assembled src path for the audit
+    message.
+    """
+    src_parent = posixpath.dirname(src) or "/"
+    src_filename = posixpath.basename(src)
+    if not src_filename:
+        raise ValueError(f"src must include a filename, not just a directory: {src!r}")
+    src_parent_canonical = await canonicalize_and_check(
+        conn,
+        src_parent,
+        allowlist,
+        must_exist=True,
+        platform=platform,
+    )
+    check_not_restricted(src_parent_canonical, restricted, platform)
+    src_full = posixpath.join(src_parent_canonical, src_filename)
+    async with conn.start_sftp_client() as sftp:
+        try:
+            await sftp.lstat(src_full)
+        except asyncssh.SFTPError as exc:
+            if _is_missing(exc):
+                raise ValueError(f"src does not exist: {src_full!r}") from exc
+            raise
+    check_not_restricted(src_full, restricted, platform)
+
+    cmd = shlex.join(["ln", "-P", "--", src_full, dst_canonical])
+    result = await conn.run(cmd, check=False)
+    if result.exit_status != 0:
+        stderr = result.stderr
+        if isinstance(stderr, bytes | bytearray):
+            stderr = stderr.decode(errors="replace")
+        raise WriteError(
+            f"ln -P failed (exit {result.exit_status}): {stderr.strip() if stderr else 'no stderr'}"
+        )
+    return src_full
 
 
 def _is_cross_device(exc: asyncssh.SFTPError) -> bool:
@@ -403,13 +615,31 @@ def _is_cross_device(exc: asyncssh.SFTPError) -> bool:
 async def ssh_upload(
     host: str,
     path: str,
-    content_base64: str,
     ctx: Context,
+    content_base64: str | None = None,
+    content_text: str | None = None,
     mode: int = 0o644,
 ) -> WriteResult:
-    """Upload a file. Written to `<path>.ssh-mcp-tmp.<rand>` then atomically renamed."""
+    """Create or replace a file. Written to `<path>.ssh-mcp-tmp.<rand>` then
+    atomically renamed -- a crash mid-write leaves the temp, never a partial
+    final file.
+
+    USE THIS INSTEAD OF `ssh_exec_run` for `cat > path <<EOF`, `tee path`,
+    `echo "..." > path`, `printf "..." > path`, and any other pattern that
+    creates or replaces a file's whole content. The path goes through
+    `canonicalize_and_check` + `restricted_paths` (none of which `ssh_exec_run`
+    enforces), the write is atomic, and the audit line records the canonical
+    path. Heredoc-via-shell offers none of these.
+
+    PAYLOAD: pass exactly one of `content_text` (plain UTF-8) or
+    `content_base64` (binary-safe). `content_text` is the right choice for
+    config files, scripts, Markdown, JSON, code -- anything you would type
+    in an editor. `content_base64` is the right choice for binaries
+    (tarballs, images, compiled artifacts) where invalid UTF-8 must round
+    trip cleanly.
+    """
     _pool, policy, settings, conn, canonical = await _prepare_creatable(ctx, host, path)
-    data = base64.b64decode(content_base64, validate=True)
+    data = _resolve_upload_payload(content_text, content_base64)
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
     if len(data) > cap:
         raise WriteError(f"payload {len(data)} bytes exceeds SSH_UPLOAD_MAX_FILE_BYTES={cap}")
@@ -421,6 +651,31 @@ async def ssh_upload(
         success=True,
         bytes_written=len(data),
         message="uploaded (atomic)",
+    )
+
+
+def _resolve_upload_payload(
+    content_text: str | None,
+    content_base64: str | None,
+) -> bytes:
+    """Validate exactly-one-of and return the bytes that will hit disk.
+
+    Both fields keyword-only at the tool surface. Callers MUST pass one and
+    only one -- the empty-string case for `content_text` is a deliberate
+    valid input (write a zero-byte file), so we can't use truthiness.
+    """
+    if content_text is not None and content_base64 is not None:
+        raise WriteError(
+            "ssh_upload / ssh_deploy: pass exactly one of content_text "
+            "(plain UTF-8) or content_base64 (binary-safe). Both were set."
+        )
+    if content_text is not None:
+        return content_text.encode("utf-8")
+    if content_base64 is not None:
+        return base64.b64decode(content_base64, validate=True)
+    raise WriteError(
+        "ssh_upload / ssh_deploy: pass exactly one of content_text "
+        "(plain UTF-8) or content_base64 (binary-safe). Neither was set."
     )
 
 
@@ -444,9 +699,7 @@ async def ssh_edit(
         attrs = await sftp.stat(canonical)
         size = attrs.size or 0
         if size > cap:
-            raise WriteError(
-                f"file {size} bytes exceeds SSH_EDIT_MAX_FILE_BYTES={cap}"
-            )
+            raise WriteError(f"file {size} bytes exceeds SSH_EDIT_MAX_FILE_BYTES={cap}")
         async with sftp.open(canonical, "rb") as f:
             raw = await f.read()
         # INC-010: surface a clean WriteError on non-UTF-8 files rather than
@@ -494,9 +747,7 @@ async def ssh_patch(
         attrs = await sftp.stat(canonical)
         size = attrs.size or 0
         if size > cap:
-            raise WriteError(
-                f"file {size} bytes exceeds SSH_EDIT_MAX_FILE_BYTES={cap}"
-            )
+            raise WriteError(f"file {size} bytes exceeds SSH_EDIT_MAX_FILE_BYTES={cap}")
         async with sftp.open(canonical, "rb") as f:
             raw = await f.read()
         # INC-010: surface a clean WriteError on non-UTF-8 files rather than
@@ -534,8 +785,9 @@ async def ssh_patch(
 async def ssh_deploy(
     host: str,
     path: str,
-    content_base64: str,
     ctx: Context,
+    content_base64: str | None = None,
+    content_text: str | None = None,
     mode: int = 0o644,
     backup: bool = True,
 ) -> dict[str, Any]:
@@ -547,12 +799,15 @@ async def ssh_deploy(
     content is written. The new content then lands via the same tmp+rename
     atomic dance as ``ssh_upload``.
 
+    PAYLOAD: pass exactly one of ``content_text`` (plain UTF-8) or
+    ``content_base64`` (binary-safe). Same semantics as ``ssh_upload``.
+
     Does NOT handle chown/owner changes -- that would require sudo (see
     ``ssh_sudo_exec`` in the dangerous tier). ``mode`` sets the file's
     permission bits and is applied to the tmp file before the final rename.
     """
     _pool, policy, settings, conn, canonical = await _prepare_creatable(ctx, host, path)
-    data = base64.b64decode(content_base64, validate=True)
+    data = _resolve_upload_payload(content_text, content_base64)
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
     if len(data) > cap:
         raise WriteError(f"payload {len(data)} bytes exceeds SSH_UPLOAD_MAX_FILE_BYTES={cap}")

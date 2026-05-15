@@ -100,7 +100,7 @@ Append-only log. One entry per decision, newest at the bottom. Format borrowed f
 
 **Context:** SSH libraries commonly default to lax or auto-accept host-key policies (effectively TOFU without the operator being asked), and MCP servers built on them inherit that posture by default. That's MITM-prone.
 
-**Decision:** `known_hosts` is loaded at startup and enforced. Unknown host → `UnknownHost` with operator-action message. Mismatch → `HostKeyMismatch` logged at WARNING (security event). Auto-accept is not available as a config option. An explicit operator-only tool `ssh_known_hosts_add` exists behind a dedicated `SSH_ALLOW_KNOWN_HOSTS_WRITE=true` flag for controlled first-connect pinning.
+**Decision:** `known_hosts` is loaded at startup and enforced. Unknown host → `UnknownHost` with operator-action message. Mismatch → `HostKeyMismatch` logged at WARNING (security event). Auto-accept is not available as a config option. An operator-only tool `ssh_known_hosts_add` for controlled first-connect pinning would require a fresh gate; the original `SSH_ALLOW_KNOWN_HOSTS_WRITE` flag was removed in v1.3.0 as it had no live caller.
 
 **Consequences:** Slightly more friction on first-time host setup; much less MITM risk. Operators pin hosts via a human-in-the-loop path, not the LLM.
 
@@ -295,3 +295,29 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 **Decision:** Target `fastmcp>=3.0.0,<4.0.0`. Optional extras: `fastmcp[tasks]` for Docket/background tasks; `opentelemetry-distro` + OTLP exporter for telemetry. No attempt to maintain FastMCP 2 compatibility.
 
 **Consequences:** Cleaner code, but tied to FastMCP 3 lifecycle. Major-version bumps require revalidation (AGENTS.md §5.5).
+
+---
+
+## ADR-0024 — `ResolvedHost` value type at the resolution boundary
+
+**Status:** Accepted (2026-04-28)
+
+**Context:** `host: str` flowing from MCP input through `resolve_host()` into `pool.acquire()` lost the canonical-vs-alias distinction in the type system. Functions deep in the call stack couldn't tell if they had a validated hostname or raw user input. INC-030 / INC-046 are representative of the bug class this prevents — a bare string slipping past the resolution boundary and being treated as if it were already canonical.
+
+**Decision:** Introduce a frozen Pydantic `ResolvedHost(BaseModel)` (`extra="forbid"`) bundling `hostname: str` (canonical, post-alias-resolution) and `policy: HostPolicy`. `resolve_host(ctx, name) -> ResolvedHost` is the single resolution call site in [tools/_context.py](src/ssh_mcp/tools/_context.py). `pool.acquire(resolved: ResolvedHost)` unwraps to `_acquire_policy(policy)` at the pool boundary; `_check_allowed`, `open_connection`, and `_open_single` keep consuming `HostPolicy` directly. The stateless policy validators (`path_policy`, `exec_policy`, `host_policy`) keep `HostPolicy` — they have no need for the canonical-vs-alias distinction. Bastion hop paths use `_acquire_policy` directly because hop hosts come from the in-memory registry and are never raw user input. `require_posix(...)` was updated to accept `ResolvedHost` so it can surface the alias in its error messages. `multi_host_tools.py` stores `dict[str, ResolvedHost]` (alias → resolved). The double-resolve pattern at `systemctl` and SFTP helper sites was intentionally preserved to keep T1's scope tight; threading `resolved` through those helpers is a follow-up backlog item.
+
+**Consequences:** MCP tool input signatures stay `host: str`; the value type lives downstream of the MCP boundary and is invisible to callers. The type system now enforces that anything operating on a validated hostname receives a `ResolvedHost`, not a raw string. Future cleanup: thread `resolved` through the eight `systemctl` wrapper sites and analogous patterns in `ssh_cp` / `ssh_mv` / `ssh_docker_exec` that currently double-resolve. Reviewer flagged this as a low-priority mechanical backlog item.
+
+**References:** ArjanCodes patterns skill `[26/value]` + `[25/brittle]`. Sprint task T1 in `.claude/state/current-sprint.md`.
+
+---
+
+## ADR-0025 — Uniform `extra="forbid"` on all result models (incl. systemctl)
+
+**Status:** Accepted (2026-04-30)
+
+**Context:** INC-046 (2026-04-17) applied `extra="forbid"` + `_RESULT_MODEL_CONFIG = ConfigDict(extra="forbid")` to the 13 result models in `models/results.py`. The 9 systemctl result models in `models/systemctl.py` were authored after that review and were the only remaining model file missing the strictness config. A BACKLOG item captured this gap as a deferred follow-up.
+
+**Decision:** Sprint 3 (v1.4.0) adds `_RESULT_MODEL_CONFIG = ConfigDict(extra="forbid")` to `models/systemctl.py` and applies it to all 9 systemctl result models (`SystemctlStatusResult`, `SystemctlIsActiveResult`, `SystemctlIsEnabledResult`, `SystemctlIsFailedResult`, `SystemctlListUnitsResult`, `SystemctlShowResult`, `SystemctlCatResult`, `JournalctlResult`, `SystemctlListUnitsEntry`). This mirrors the exact pattern used in `models/results.py` — one shared constant, applied to every model in the file.
+
+**Consequences:** Construction-site typos on systemctl result models now raise `ValidationError` at the call site rather than silently dropping the field. The deferred BACKLOG item is closed. All `models/*.py` result classes now uniformly use `extra="forbid"` — no per-model exceptions remain.

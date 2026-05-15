@@ -505,8 +505,8 @@ class TestJournalctlValidation:
 
     @pytest.mark.asyncio
     async def test_lines_at_exactly_1000_accepted(self, monkeypatch: Any) -> None:
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("line\n" * 1000, "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("line\n" * 1000, "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_journalctl(host="testhost", unit="nginx.service", ctx=_make_ctx(), lines=1000)
@@ -550,8 +550,8 @@ class TestToolShapes:
     async def test_systemctl_status_shape(self, monkeypatch: Any) -> None:
         stdout = "* nginx.service - nginx\n" "   Active: active (running) since Mon 2026-04-14 10:00:00 UTC\n"
 
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return (stdout, "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return (stdout, "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_status(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -566,8 +566,8 @@ class TestToolShapes:
         """Exit code 3 (inactive/dead) must not be treated as an error."""
         stdout = "* nginx.service\n   Active: inactive (dead)\n"
 
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return (stdout, "", 3)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return (stdout, "", 3, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_status(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -576,8 +576,8 @@ class TestToolShapes:
 
     @pytest.mark.asyncio
     async def test_systemctl_is_active_shape(self, monkeypatch: Any) -> None:
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("active\n", "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("active\n", "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_is_active(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -586,8 +586,8 @@ class TestToolShapes:
 
     @pytest.mark.asyncio
     async def test_systemctl_is_enabled_shape(self, monkeypatch: Any) -> None:
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("enabled\n", "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("enabled\n", "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_is_enabled(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -596,8 +596,8 @@ class TestToolShapes:
     @pytest.mark.asyncio
     async def test_systemctl_is_failed_true(self, monkeypatch: Any) -> None:
         # Exit 0 means IS failed (the unit IS in a failed state).
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("failed\n", "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("failed\n", "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_is_failed(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -607,8 +607,8 @@ class TestToolShapes:
     @pytest.mark.asyncio
     async def test_systemctl_is_failed_false(self, monkeypatch: Any) -> None:
         # Non-zero exit means NOT failed.
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("active\n", "", 1)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("active\n", "", 1, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_is_failed(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -618,8 +618,8 @@ class TestToolShapes:
     async def test_systemctl_list_units_shape(self, monkeypatch: Any) -> None:
         stdout = "nginx.service  loaded active running  nginx web server\n"
 
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return (stdout, "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return (stdout, "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_list_units(host="testhost", ctx=_make_ctx())
@@ -629,8 +629,8 @@ class TestToolShapes:
 
     @pytest.mark.asyncio
     async def test_systemctl_show_shape(self, monkeypatch: Any) -> None:
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("ActiveState=active\nNRestarts=0\n", "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("ActiveState=active\nNRestarts=0\n", "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_show(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -639,8 +639,8 @@ class TestToolShapes:
 
     @pytest.mark.asyncio
     async def test_systemctl_show_with_properties_filter(self, monkeypatch: Any) -> None:
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return ("ActiveState=active\n", "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return ("ActiveState=active\n", "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_show(
@@ -655,8 +655,8 @@ class TestToolShapes:
     async def test_systemctl_cat_shape(self, monkeypatch: Any) -> None:
         unit_file = "[Unit]\nDescription=nginx\n[Service]\nExecStart=/usr/sbin/nginx\n"
 
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return (unit_file, "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return (unit_file, "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_systemctl_cat(host="testhost", unit="nginx.service", ctx=_make_ctx())
@@ -667,8 +667,8 @@ class TestToolShapes:
     async def test_journalctl_shape(self, monkeypatch: Any) -> None:
         log_lines = "Apr 14 10:00:00 nginx: starting\nApr 14 10:00:01 nginx: started\n"
 
-        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int]:
-            return (log_lines, "", 0)
+        async def fake(*_a: Any, **_kw: Any) -> tuple[str, str, int, list[str]]:
+            return (log_lines, "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         result = await ssh_journalctl(host="testhost", unit="nginx.service", ctx=_make_ctx(), lines=50)
@@ -680,9 +680,9 @@ class TestToolShapes:
     async def test_journalctl_with_all_options(self, monkeypatch: Any) -> None:
         captured: dict[str, Any] = {}
 
-        async def fake(ctx: Any, host: str, argv: list[str], **kw: Any) -> tuple[str, str, int]:
+        async def fake(ctx: Any, host: str, argv: list[str], **kw: Any) -> tuple[str, str, int, list[str]]:
             captured["argv"] = argv
-            return ("log line\n", "", 0)
+            return ("log line\n", "", 0, [])
 
         monkeypatch.setattr(systemctl_tools, "_run_systemctl", fake)
         await ssh_journalctl(

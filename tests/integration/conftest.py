@@ -31,7 +31,7 @@ import asyncssh
 import pytest
 
 from ssh_mcp.config import Settings
-from ssh_mcp.models.policy import AuthPolicy, HostPolicy
+from ssh_mcp.models.policy import AuthPolicy, HostPolicy, ResolvedHost
 from ssh_mcp.ssh.known_hosts import KnownHosts
 from ssh_mcp.ssh.pool import ConnectionPool
 
@@ -141,6 +141,12 @@ def integration_policy(ephemeral_keypair: tuple[Path, Path]) -> HostPolicy:
         auth=AuthPolicy(method="key", key=priv),
         path_allowlist=["/config", "/tmp"],
     )
+
+
+@pytest.fixture(scope="session")
+def integration_resolved(integration_policy: HostPolicy) -> ResolvedHost:
+    """`ResolvedHost` wrapping `integration_policy` for `pool.acquire(...)` calls."""
+    return ResolvedHost(hostname=integration_policy.hostname, policy=integration_policy)
 
 
 @pytest.fixture

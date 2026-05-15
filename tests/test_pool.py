@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from ssh_mcp.config import Settings
-from ssh_mcp.models.policy import AuthPolicy, HostPolicy
+from ssh_mcp.models.policy import AuthPolicy, HostPolicy, ResolvedHost
 from ssh_mcp.ssh.errors import HostBlocked, HostNotAllowed
 from ssh_mcp.ssh.known_hosts import KnownHosts
 from ssh_mcp.ssh.pool import ConnectionPool
@@ -34,6 +34,11 @@ def _make_policy(host: str = "web01.internal", user: str = "deploy") -> HostPoli
     return HostPolicy(
         hostname=host, user=user, port=22, auth=AuthPolicy(method="agent")
     )
+
+
+def _resolve(policy: HostPolicy) -> ResolvedHost:
+    """Test helper: wrap a HostPolicy in a ResolvedHost the way `_context.resolve_host` would."""
+    return ResolvedHost(hostname=policy.hostname, policy=policy)
 
 
 def _make_settings(idle_timeout: int = 300, allowlist: list[str] | None = None) -> Settings:
@@ -68,8 +73,8 @@ async def test_acquire_reuses_connection(known_hosts_obj: KnownHosts) -> None:
     policy = _make_policy()
 
     with _patch_opener(conn, counter):
-        c1 = await pool.acquire(policy)
-        c2 = await pool.acquire(policy)
+        c1 = await pool.acquire(_resolve(policy))
+        c2 = await pool.acquire(_resolve(policy))
 
     assert c1 is conn
     assert c2 is conn
@@ -86,7 +91,7 @@ async def test_host_not_allowlisted_rejected(known_hosts_obj: KnownHosts) -> Non
     policy = _make_policy("other.internal")
 
     with pytest.raises(HostNotAllowed):
-        await pool.acquire(policy)
+        await pool.acquire(_resolve(policy))
 
 
 @pytest.mark.asyncio
@@ -95,7 +100,7 @@ async def test_empty_registry_is_default_deny(known_hosts_obj: KnownHosts) -> No
     pool.bind({}, known_hosts_obj)
     policy = _make_policy()
     with pytest.raises(HostNotAllowed, match="no hosts configured"):
-        await pool.acquire(policy)
+        await pool.acquire(_resolve(policy))
 
 
 @pytest.mark.asyncio
@@ -107,7 +112,7 @@ async def test_reaper_closes_idle(known_hosts_obj: KnownHosts) -> None:
     policy = _make_policy()
 
     with _patch_opener(conn, counter):
-        await pool.acquire(policy)
+        await pool.acquire(_resolve(policy))
 
     # Force the entry to look stale, then reap manually (don't wait 60s).
     for entry in pool._entries.values():
@@ -133,8 +138,9 @@ async def test_concurrent_acquires_open_one(known_hosts_obj: KnownHosts) -> None
         return conn
 
     with patch("ssh_mcp.ssh.pool.open_connection", delayed_open, create=True):
+        resolved = _resolve(policy)
         c1, c2, c3 = await asyncio.gather(
-            pool.acquire(policy), pool.acquire(policy), pool.acquire(policy)
+            pool.acquire(resolved), pool.acquire(resolved), pool.acquire(resolved)
         )
 
     assert c1 is conn
@@ -156,7 +162,7 @@ async def test_pool_blocks_blocklisted_hostname(known_hosts_obj: KnownHosts) -> 
     pool.bind({}, known_hosts_obj)
     policy = _make_policy("prod-db.internal")
     with pytest.raises(HostBlocked):
-        await pool.acquire(policy)
+        await pool.acquire(_resolve(policy))
 
 
 @pytest.mark.asyncio
@@ -167,7 +173,7 @@ async def test_stats_reports_idle_seconds(known_hosts_obj: KnownHosts) -> None:
     pool.bind({}, known_hosts_obj)
     policy = _make_policy()
     with _patch_opener(conn, counter):
-        await pool.acquire(policy)
+        await pool.acquire(_resolve(policy))
     stats = pool.stats()
     assert len(stats) == 1
     assert stats[0]["host"] == "web01.internal"

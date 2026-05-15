@@ -1,8 +1,11 @@
 """services/alerts.evaluate -- threshold evaluation is pure-python; no SSH needed."""
+
 from __future__ import annotations
 
+import pytest
+
 from ssh_mcp.models.policy import AlertsPolicy
-from ssh_mcp.services.alerts import breach_to_dict, evaluate
+from ssh_mcp.services.alerts import evaluate
 
 
 def _ok_metrics() -> dict:
@@ -81,9 +84,7 @@ def test_missing_metric_is_silently_skipped() -> None:
 
 
 def test_multiple_simultaneous_breaches() -> None:
-    policy = AlertsPolicy(
-        disk_use_percent_max=50, load_avg_1min_max=1.0, mem_free_percent_min=50
-    )
+    policy = AlertsPolicy(disk_use_percent_max=50, load_avg_1min_max=1.0, mem_free_percent_min=50)
     metrics = {
         "disk_entries": [{"mount": "/", "use_percent": "99%"}],
         "load_1min": 5.0,
@@ -95,10 +96,66 @@ def test_multiple_simultaneous_breaches() -> None:
     assert metrics_seen == {"disk_use_percent", "load_avg_1min", "mem_free_percent"}
 
 
-def test_breach_to_dict_shape() -> None:
-    policy = AlertsPolicy(disk_use_percent_max=50)
-    metrics = _ok_metrics()
-    metrics["disk_entries"] = [{"mount": "/", "use_percent": "90%"}]
-    result = evaluate(host="web", policy=policy, **metrics)
-    d = breach_to_dict(result.breaches[0])
-    assert set(d) == {"metric", "threshold", "current", "severity", "detail"}
+# Sprint 5: HostAlertsResult / AlertBreach models replace the dict
+# response from `ssh_host_alerts` with typed Pydantic models. Pin the
+# field shape and `extra="forbid"` config so a future refactor that
+# adds a key to the evaluator output can't silently drift the schema.
+
+
+def test_host_alerts_result_model_shape() -> None:
+    from ssh_mcp.models.results import AlertBreach, HostAlertsResult
+
+    breach = AlertBreach(
+        metric="disk_use_percent",
+        threshold=50.0,
+        current=90.0,
+        severity="warning",
+        detail="mount=/var",
+    )
+    result = HostAlertsResult(
+        host="web01",
+        breaches=[breach],
+        metrics={
+            "disk_entries": [{"mount": "/", "use_percent": 42.0}],
+            "load_avg_1min": 0.3,
+            "mem_free_percent": 60.0,
+        },
+    )
+    assert result.host == "web01"
+    assert len(result.breaches) == 1
+    assert result.breaches[0].metric == "disk_use_percent"
+    assert result.breaches[0].current == 90.0
+    assert result.metrics["load_avg_1min"] == 0.3
+
+
+def test_host_alerts_result_forbids_extra_fields() -> None:
+    """ConfigDict(extra="forbid") catches typos at construction time
+    rather than letting them propagate through the audit log -- pinned
+    by INC-046 / ADR-0025."""
+    from pydantic import ValidationError
+
+    from ssh_mcp.models.results import HostAlertsResult
+
+    with pytest.raises(ValidationError):
+        HostAlertsResult(
+            host="h",
+            breaches=[],
+            metrics={},
+            unknown_field="oops",  # type: ignore[call-arg]
+        )
+
+
+def test_alert_breach_forbids_extra_fields() -> None:
+    from pydantic import ValidationError
+
+    from ssh_mcp.models.results import AlertBreach
+
+    with pytest.raises(ValidationError):
+        AlertBreach(
+            metric="x",
+            threshold=1.0,
+            current=2.0,
+            severity="warning",
+            detail="",
+            unknown="oops",  # type: ignore[call-arg]
+        )

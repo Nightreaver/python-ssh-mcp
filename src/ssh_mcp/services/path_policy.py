@@ -11,6 +11,7 @@ fallback for paths that don't yet exist; allowlist prefix matching uses
 case-folded forward-slash form on Windows so `C:\\opt\\app` matches either
 ``C:\\OPT\\APP\\file`` or ``C:/opt/app/file`` equivalently.
 """
+
 from __future__ import annotations
 
 import ntpath
@@ -89,9 +90,7 @@ def _prefix_match(canonical: str, root: str, platform: Platform) -> bool:
     return c == r or c.startswith(r + "/")
 
 
-def check_not_restricted(
-    canonical: str, restricted: list[str], platform: Platform = "posix"
-) -> None:
+def check_not_restricted(canonical: str, restricted: list[str], platform: Platform = "posix") -> None:
     """Raise ``PathRestricted`` if ``canonical`` is inside any restricted root.
 
     Prefix semantics identical to ``check_in_allowlist`` (i.e. ``/mnt/shared``
@@ -115,9 +114,7 @@ def check_not_restricted(
 _ALLOW_ALL_SENTINELS = frozenset({"*", "/"})
 
 
-def check_in_allowlist(
-    canonical: str, allowlist: list[str], platform: Platform = "posix"
-) -> None:
+def check_in_allowlist(canonical: str, allowlist: list[str], platform: Platform = "posix") -> None:
     """Raise PathNotAllowed if `canonical` is not inside any allowlisted root.
 
     Sentinels: an allowlist entry of ``"*"`` or ``"/"`` means "every absolute
@@ -180,7 +177,10 @@ async def canonicalize(
 
 
 async def _canonicalize_posix(
-    conn: asyncssh.SSHClientConnection, path: str, *, must_exist: bool,
+    conn: asyncssh.SSHClientConnection,
+    path: str,
+    *,
+    must_exist: bool,
 ) -> str:
     # GNU realpath modes:
     #   default: parent must exist; leaf may not
@@ -221,7 +221,10 @@ def _is_windows_absolute(path: str) -> bool:
 
 
 async def _canonicalize_windows(
-    conn: asyncssh.SSHClientConnection, path: str, *, must_exist: bool,
+    conn: asyncssh.SSHClientConnection,
+    path: str,
+    *,
+    must_exist: bool,
 ) -> str:
     # SFTP realpath -- works regardless of remote OS and respects existing
     # symlinks. Servers that refuse realpath on non-existing targets fall
@@ -237,9 +240,7 @@ async def _canonicalize_windows(
         # Does NOT resolve symlinks -- on Windows we accept this weaker
         # guarantee for non-existing paths (upload / mkdir targets).
         if not _is_windows_absolute(path):
-            raise PathNotAllowed(
-                f"path {path!r} is not absolute; expected `C:\\...` or `C:/...`"
-            )
+            raise PathNotAllowed(f"path {path!r} is not absolute; expected `C:\\...` or `C:/...`")
         canonical_raw = ntpath.normpath(path)
 
     if isinstance(canonical_raw, bytes):
@@ -262,9 +263,7 @@ async def _canonicalize_windows(
     ):
         canonical = canonical[1:]
     if not _is_windows_absolute(canonical):
-        raise PathNotAllowed(
-            f"canonicalized path is not absolute: {canonical!r}"
-        )
+        raise PathNotAllowed(f"canonicalized path is not absolute: {canonical!r}")
 
     if must_exist:
         # Double-check via SFTP stat so the same "must exist" semantics apply
@@ -273,9 +272,7 @@ async def _canonicalize_windows(
             async with conn.start_sftp_client() as sftp:
                 await sftp.stat(canonical)
         except asyncssh.SFTPError as exc:
-            raise PathNotAllowed(
-                f"cannot canonicalize {path!r}: {exc}"
-            ) from exc
+            raise PathNotAllowed(f"cannot canonicalize {path!r}: {exc}") from exc
     return canonical
 
 
@@ -304,3 +301,31 @@ async def canonicalize_and_check(
         check_in_allowlist(canonical, allowlist, platform)
         s.set_attribute("path.canonical_len", len(canonical))
         return canonical
+
+
+async def resolve_path(
+    conn: asyncssh.SSHClientConnection,
+    path: str,
+    policy: HostPolicy,
+    settings: Settings,
+    *,
+    must_exist: bool = True,
+) -> str:
+    """Canonicalize ``path``, enforce allowlist + restricted-zones in one shot.
+
+    Bundles the standard low-access path resolution chain so callers can't
+    accidentally skip the restricted-paths check. Returns the canonical path.
+    """
+    canonical = await canonicalize_and_check(
+        conn,
+        path,
+        effective_allowlist(policy, settings),
+        must_exist=must_exist,
+        platform=policy.platform,
+    )
+    check_not_restricted(
+        canonical,
+        effective_restricted_paths(policy, settings),
+        policy.platform,
+    )
+    return canonical

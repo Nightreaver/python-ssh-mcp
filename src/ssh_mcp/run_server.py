@@ -10,4 +10,11 @@ def main() -> None:
         level=settings.LOG_LEVEL,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    mcp_server.run()
+    if settings.MCP_TRANSPORT == "stdio":
+        mcp_server.run(transport="stdio")
+    else:
+        mcp_server.run(
+            transport=settings.MCP_TRANSPORT,
+            host=settings.MCP_HTTP_HOST,
+            port=settings.MCP_HTTP_PORT,
+        )

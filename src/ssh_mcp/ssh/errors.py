@@ -4,6 +4,7 @@ These map to MCP error responses (see DESIGN.md §2.4 / §6). Errors that are
 security-relevant (HostKeyMismatch, UnknownHost, HostNotAllowed, PathNotAllowed)
 are logged at WARNING; transport failures at INFO.
 """
+
 from __future__ import annotations
 
 
@@ -28,8 +29,7 @@ class HostKeyMismatch(SSHMCPError):
 
     def __init__(self, host: str, expected: str, actual: str) -> None:
         super().__init__(
-            f"host key for {host} does not match known_hosts "
-            f"(expected {expected}, got {actual})"
+            f"host key for {host} does not match known_hosts (expected {expected}, got {actual})"
         )
         self.host = host
         self.expected_fingerprint = expected
@@ -46,10 +46,6 @@ class AgentFingerprintNotFound(SSHMCPError):
 
 class ConnectError(SSHMCPError):
     """TCP/SSH handshake failed (timeout, refused, etc.)."""
-
-
-class CommandTimeout(SSHMCPError):
-    """Remote command exceeded its timeout."""
 
 
 class PathNotAllowed(SSHMCPError):

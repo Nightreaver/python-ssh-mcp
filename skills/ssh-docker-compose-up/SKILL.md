@@ -9,12 +9,14 @@ description: Bring up a docker-compose project (default detached)
 Runs `<compose> -f <file> up [-d] [--build]`. Creates networks, volumes,
 and containers as described by the compose file. Path-confined.
 
+A compose YAML is *executed* (mounts volumes, declares ports, runs init commands), so its file-path is policy-gated the same way read/write paths are.
+
 ## Inputs
 
 | name | type | required | default | notes |
 |---|---|---|---|---|
 | `host` | str | yes | -- | Alias |
-| `compose_file` | str | yes | -- | Absolute; in `path_allowlist` |
+| `compose_file` | str | yes | -- | Absolute; in `path_allowlist` and outside `restricted_paths` |
 | `detached` | bool | no | True | `-d` (don't attach to container output) |
 | `build` | bool | no | False | `--build` rebuild images first |
 | `timeout` | int | no | `SSH_COMMAND_TIMEOUT` | Raise for slow builds/pulls |
@@ -51,6 +53,7 @@ ssh_docker_compose_up(
 ## Common failures
 
 - `PathNotAllowed` -- compose_file outside allowlist.
+- `PathRestricted` -- compose_file inside a restricted zone (e.g. SMB mount, NFS share).
 - `compose file version unsupported` -- upgrade docker compose on the host.
 - Long running when pulling/building -- raise the `timeout` kwarg.
 

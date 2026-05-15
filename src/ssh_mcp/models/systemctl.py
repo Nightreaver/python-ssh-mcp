@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+# Mirror models/results.py (INC-046): every result model forbids extras so a
+# typo at construction surfaces immediately instead of producing incomplete
+# output the LLM then trusts.
+_RESULT_MODEL_CONFIG = ConfigDict(extra="forbid")
 
 # ---------------------------------------------------------------------------
 # ssh_systemctl_status
@@ -19,12 +24,19 @@ from pydantic import BaseModel
 class SystemctlStatusResult(BaseModel):
     """Result of ``systemctl status <unit> --no-pager``."""
 
+    model_config = _RESULT_MODEL_CONFIG
+
     host: str
     unit: str
     stdout: str
     exit_code: int
     # Parsed from the ``Active:`` line; None when not present in output.
     active_state: str | None = None
+    # INC-058: output_sanitizer warnings about `stdout`. Empty for clean
+    # output. ANSI / NUL stripped from stdout already; warnings flag the
+    # strip + any non-stripped suspicious patterns (bidi, zero-width,
+    # LLM markers, fake conversation turns).
+    output_warnings: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +57,8 @@ IsActiveState = Literal[
 
 class SystemctlIsActiveResult(BaseModel):
     """Result of ``systemctl is-active <unit>``."""
+
+    model_config = _RESULT_MODEL_CONFIG
 
     host: str
     unit: str
@@ -79,6 +93,8 @@ IsEnabledState = Literal[
 class SystemctlIsEnabledResult(BaseModel):
     """Result of ``systemctl is-enabled <unit>``."""
 
+    model_config = _RESULT_MODEL_CONFIG
+
     host: str
     unit: str
     state: IsEnabledState
@@ -92,6 +108,8 @@ class SystemctlIsEnabledResult(BaseModel):
 
 class SystemctlIsFailedResult(BaseModel):
     """Result of ``systemctl is-failed <unit>``."""
+
+    model_config = _RESULT_MODEL_CONFIG
 
     host: str
     unit: str
@@ -108,6 +126,8 @@ class SystemctlIsFailedResult(BaseModel):
 class SystemctlUnitEntry(BaseModel):
     """One row from ``systemctl list-units --no-legend --no-pager``."""
 
+    model_config = _RESULT_MODEL_CONFIG
+
     unit: str
     load: str
     active: str
@@ -117,6 +137,8 @@ class SystemctlUnitEntry(BaseModel):
 
 class SystemctlListUnitsResult(BaseModel):
     """Result of ``systemctl list-units``."""
+
+    model_config = _RESULT_MODEL_CONFIG
 
     host: str
     units: list[SystemctlUnitEntry]
@@ -130,6 +152,8 @@ class SystemctlListUnitsResult(BaseModel):
 
 class SystemctlShowResult(BaseModel):
     """Result of ``systemctl show <unit>``."""
+
+    model_config = _RESULT_MODEL_CONFIG
 
     host: str
     unit: str
@@ -146,10 +170,15 @@ class SystemctlShowResult(BaseModel):
 class SystemctlCatResult(BaseModel):
     """Result of ``systemctl cat <unit>``."""
 
+    model_config = _RESULT_MODEL_CONFIG
+
     host: str
     unit: str
     stdout: str
     exit_code: int
+    # INC-058: output_sanitizer warnings about `stdout` (the unit file
+    # contents). Empty for clean unit files.
+    output_warnings: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +189,14 @@ class SystemctlCatResult(BaseModel):
 class JournalctlResult(BaseModel):
     """Result of ``journalctl -u <unit>``."""
 
+    model_config = _RESULT_MODEL_CONFIG
+
     host: str
     unit: str
     stdout: str
     lines_returned: int
     exit_code: int
+    # INC-058: output_sanitizer warnings about `stdout`. Log lines are
+    # the most common prompt-injection vector (anything that ends up
+    # in the journal: motd, sshd auth lines, application crash dumps).
+    output_warnings: list[str] = []

@@ -1,4 +1,14 @@
-"""Keyed connection pool with idle reaper. See DESIGN.md §5.3 and ADR-0012."""
+"""Keyed connection pool with idle reaper. See DESIGN.md §5.3 and ADR-0012.
+
+Naming convention: methods prefixed with ``_`` (e.g. ``_check_allowed``,
+``_reap_loop``) are pool-internals not for tool-layer use. Public methods
+(``acquire``, ``acquire_policy``, ``close``, ``stats``, ``host``) are the
+documented surface; ``acquire_policy`` is a sibling-module contract called
+from :mod:`ssh_mcp.ssh.connection` for the proxy-jump bastion path, where
+hop policies come from the in-memory hosts registry rather than user
+input. Tools should always go through ``acquire(ResolvedHost)``.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +25,7 @@ if TYPE_CHECKING:
     import asyncssh
 
     from ..config import Settings
-    from ..models.policy import HostPolicy
+    from ..models.policy import HostPolicy, ResolvedHost
     from .known_hosts import KnownHosts
 
 logger = logging.getLogger(__name__)
@@ -82,8 +92,28 @@ class ConnectionPool:
 
     # --- acquire / close ---
 
-    async def acquire(self, policy: HostPolicy) -> asyncssh.SSHClientConnection:
-        """Return a connection for the given policy, opening one if needed."""
+    async def acquire(self, resolved: ResolvedHost) -> asyncssh.SSHClientConnection:
+        """Return a connection for the given resolved host, opening one if needed.
+
+        Public entry point for tool call sites: takes the post-resolution
+        `ResolvedHost` so the type system encodes that the host has cleared
+        host_policy.resolve() (alias lookup + allowlist + blocklist). The
+        bastion / proxy_chain path inside `connection.open_connection` calls
+        `acquire_policy` directly with a `HostPolicy`, since hop hosts are
+        loaded from `hosts.toml` (already canonical) rather than user-resolved.
+        """
+        return await self.acquire_policy(resolved.policy)
+
+    async def acquire_policy(self, policy: HostPolicy) -> asyncssh.SSHClientConnection:
+        """Open or reuse a connection for the given `HostPolicy`.
+
+        Sibling-module contract for :mod:`ssh_mcp.ssh.connection`; bypasses
+        the `ResolvedHost` wrapper so the bastion path (where hop policies
+        come from the in-memory hosts registry, not user input) doesn't
+        have to fake a `ResolvedHost`. The `_check_allowed` blocklist +
+        allowlist gate still runs here, regardless of caller. Not for
+        tool-layer use -- tools must go through :meth:`acquire`.
+        """
         self._check_allowed(policy)
         if self._known_hosts is None:
             raise RuntimeError("ConnectionPool.bind() must be called before acquire()")
@@ -123,9 +153,7 @@ class ConnectionPool:
     def _check_allowed(self, policy: HostPolicy) -> None:
         # 1. Default-deny when nothing is configured.
         if not self._hosts and not self._settings.SSH_HOSTS_ALLOWLIST:
-            raise HostNotAllowed(
-                "no hosts configured: add hosts.toml or set SSH_HOSTS_ALLOWLIST"
-            )
+            raise HostNotAllowed("no hosts configured: add hosts.toml or set SSH_HOSTS_ALLOWLIST")
 
         # 2. Hostname must be known.
         allowed = set(self._hosts) | set(self._settings.SSH_HOSTS_ALLOWLIST)

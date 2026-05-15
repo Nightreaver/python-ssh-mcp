@@ -1,10 +1,11 @@
-"""Persistent shell session tools. See services/shell_sessions.py for design.
+"""Persistent shell session tools + pooled-connection inspection.
 
-Four tools:
-  - ``ssh_shell_open``   {dangerous, group:shell}  -- register a session
-  - ``ssh_shell_exec``   {dangerous, group:shell}  -- run a command; cwd persists
-  - ``ssh_shell_close``  {low-access, group:shell} -- drop a session
-  - ``ssh_shell_list``   {safe, read, group:shell} -- enumerate open sessions
+Tools registered here:
+  - ``ssh_shell_open``    {dangerous, group:shell}    -- register a session
+  - ``ssh_shell_exec``    {dangerous, group:shell}    -- run a command; cwd persists
+  - ``ssh_shell_close``   {low-access, group:shell}   -- drop a session
+  - ``ssh_shell_list``    {safe, read, group:shell}   -- enumerate open sessions
+  - ``ssh_session_list``  {safe, read, group:session} -- list pooled SSH connections
 
 The "session" is server-side state only -- we do not hold a real remote PTY.
 Each ``ssh_shell_exec`` opens a fresh channel, prefixes the command with
@@ -14,7 +15,13 @@ returned stdout has the sentinel line stripped.
 Command allowlist (``check_command``) applies to ``ssh_shell_exec`` exactly
 the same way it does to ``ssh_exec_run`` -- persistent state doesn't change
 the risk model.
+
+``ssh_session_list`` lives here too (Sprint 5 merge): it inspects the
+``ConnectionPool`` rather than the shell-session registry, but it's the
+read-side counterpart to ``ssh_shell_list`` and they share the
+"enumerate open server-side state" shape.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -44,8 +51,9 @@ async def ssh_shell_open(host: str, ctx: Context) -> dict[str, Any]:
     shells on specific hosts.
     """
     # Validate host resolves + is reachable via allow/block rules before opening.
-    policy = resolve_host(ctx, host)
-    require_posix(policy, tool="ssh_shell_open", reason="cwd sentinel relies on POSIX shell (`sh`, `$PWD`)")
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    require_posix(resolved, tool="ssh_shell_open", reason="cwd sentinel relies on POSIX shell (`sh`, `$PWD`)")
     if not policy.persistent_session:
         raise ValueError(
             f"host {host!r} has persistent_session=false in hosts.toml; "
@@ -78,10 +86,11 @@ async def ssh_shell_exec(
 
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, session.host)
-    require_posix(policy, tool="ssh_shell_exec", reason="cwd sentinel relies on POSIX shell")
+    resolved = resolve_host(ctx, session.host)
+    policy = resolved.policy
+    require_posix(resolved, tool="ssh_shell_exec", reason="cwd sentinel relies on POSIX shell")
     check_command(command, policy, settings)
-    conn = await pool.acquire(policy)
+    conn = await pool.acquire(resolved)
 
     # INC-047: `exec_scope()` owns the per-session lock that serializes
     # concurrent callers on the same session_id (INC-023) AND enables the
@@ -119,7 +128,16 @@ async def ssh_shell_close(session_id: str, ctx: Context) -> dict[str, Any]:
 
 
 @mcp_server.tool(tags={"safe", "read", "group:shell"}, version="1.0")
+@audited(tier="read")
 async def ssh_shell_list(ctx: Context) -> dict[str, Any]:
     """List open persistent sessions with cwd + idle age."""
     registry = _registry(ctx)
     return {"sessions": registry.list(), "count": registry.size()}
+
+
+@mcp_server.tool(tags={"safe", "read", "group:session"}, version="1.0")
+@audited(tier="read")
+async def ssh_session_list(ctx: Context) -> dict[str, Any]:
+    """List open pooled SSH connections."""
+    pool = pool_from(ctx)
+    return {"sessions": pool.stats(), "count": pool.size()}

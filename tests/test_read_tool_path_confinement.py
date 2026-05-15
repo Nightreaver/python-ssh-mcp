@@ -2,11 +2,12 @@
 
 These tools take a user-supplied `path` and would otherwise let any caller
 read arbitrary remote files (/etc/shadow, /root/.ssh/*). They must route
-paths through `services.path_policy.canonicalize_and_check` before touching
-SFTP or running `find`.
+paths through `services.path_policy.resolve_path` (which bundles
+`canonicalize_and_check` + `check_not_restricted`) before touching SFTP or
+running `find`.
 
 We lock the behavior two ways:
-  1. Source-level: each tool's source imports and references the check.
+  1. Source-level: each tool's source imports and references the helper.
   2. Behavioral: a fake conn + empty allowlist + in-allowlist path proves
      the check actually runs.
 """
@@ -28,19 +29,18 @@ READ_TOOLS_WITH_PATH = ["ssh_sftp_list", "ssh_sftp_stat", "ssh_sftp_download", "
 
 def test_read_tool_source_imports_path_policy() -> None:
     body = TOOL_FILE.read_text(encoding="utf-8")
-    assert "canonicalize_and_check" in body, (
-        "sftp_read_tools.py must import canonicalize_and_check (ADR-0017)"
-    )
-    assert "effective_allowlist" in body, (
-        "sftp_read_tools.py must import effective_allowlist"
+    assert "resolve_path" in body, (
+        "sftp_read_tools.py must import resolve_path (ADR-0017): the helper "
+        "bundles canonicalize_and_check + check_not_restricted so callers "
+        "can't accidentally skip the restricted-paths check."
     )
 
 
 @pytest.mark.parametrize("tool_name", READ_TOOLS_WITH_PATH)
-def test_each_read_tool_invokes_canonicalize_and_check(tool_name: str) -> None:
+def test_each_read_tool_invokes_resolve_path(tool_name: str) -> None:
     body = TOOL_FILE.read_text(encoding="utf-8")
     # Find the `async def <tool_name>(` block and verify it references
-    # `canonicalize_and_check` before the tool returns. Rough but effective.
+    # `resolve_path` before the tool returns. Rough but effective.
     marker = f"async def {tool_name}("
     assert marker in body, f"{tool_name} not defined in sftp_read_tools.py"
     idx = body.index(marker)
@@ -50,8 +50,8 @@ def test_each_read_tool_invokes_canonicalize_and_check(tool_name: str) -> None:
     )
     end = next_tool if next_tool > 0 else len(body)
     fn_body = body[idx:end]
-    assert "canonicalize_and_check" in fn_body, (
-        f"{tool_name} body does not call canonicalize_and_check "
+    assert "resolve_path" in fn_body, (
+        f"{tool_name} body does not call resolve_path "
         f"-- a user-supplied path can reach SFTP/find unchecked"
     )
 

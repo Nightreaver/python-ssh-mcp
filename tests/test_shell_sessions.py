@@ -63,24 +63,6 @@ def test_touch_updates_last_used() -> None:
     assert s.last_used > original
 
 
-def test_reap_idle_drops_stale_sessions() -> None:
-    r = SessionRegistry()
-    s = r.open("web01")
-    # Force it to look ancient.
-    s.last_used = time.monotonic() - 3600
-    closed = r.reap_idle(max_idle_seconds=300)
-    assert closed == [s.id]
-    assert r.size() == 0
-
-
-def test_reap_idle_keeps_fresh_sessions() -> None:
-    r = SessionRegistry()
-    s = r.open("web01")
-    closed = r.reap_idle(max_idle_seconds=300)
-    assert closed == []
-    assert r.get(s.id) is not None
-
-
 # --- command wrapping ---
 
 

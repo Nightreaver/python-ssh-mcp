@@ -28,6 +28,10 @@ if TYPE_CHECKING:
     from ..ssh.known_hosts import KnownHosts
     from ..ssh.pool import ConnectionPool
 
+# Runtime import: `resolve_host` constructs `ResolvedHost`, so the class
+# must be available at call time, not just to the type checker.
+from ..models.policy import ResolvedHost as ResolvedHost
+
 
 class LifespanContext(TypedDict):
     """Exact shape of ``ctx.lifespan_context`` throughout the ssh-mcp server.
@@ -81,23 +85,34 @@ def hosts_from(ctx: Context) -> dict[str, HostPolicy]:
     return _lifespan(ctx)["hosts"]
 
 
-def resolve_host(ctx: Context, host: str) -> HostPolicy:
-    """Resolve `host` via services/host_policy.resolve (blocklist + allowlist)."""
+def resolve_host(ctx: Context, host: str) -> ResolvedHost:
+    """Resolve `host` via services/host_policy.resolve (blocklist + allowlist).
+
+    Returns a `ResolvedHost` wrapping the canonical hostname + the resolved
+    `HostPolicy`. Call sites that need to consume `HostPolicy` (path policy,
+    exec policy, transport) unwrap via `.policy`; pool acquire and
+    `require_posix` take the `ResolvedHost` directly.
+    """
     hosts = _lifespan(ctx)["hosts"]
-    return _resolve_host_policy(host, hosts, settings_from(ctx))
+    policy = _resolve_host_policy(host, hosts, settings_from(ctx))
+    return ResolvedHost(hostname=policy.hostname, policy=policy)
 
 
-def require_posix(policy: HostPolicy, *, tool: str, reason: str) -> None:
+def require_posix(resolved: ResolvedHost, *, tool: str, reason: str) -> None:
     """Raise PlatformNotSupported if the target host is Windows.
 
     Use in tools that bake in POSIX assumptions (shell wrappers, ``/proc``
     reads, ``realpath`` probes, ``sudo``). The ``reason`` argument is the
     short "what's missing" string the error message surfaces to the LLM,
     e.g. ``"no /proc on Windows"`` or ``"relies on POSIX shell (sh)"``.
+
+    Takes a `ResolvedHost` (rather than `HostPolicy`) so the error message
+    can reference the canonical hostname without reaching into the policy
+    -- structurally matches the post-resolution call sites.
     """
-    if policy.platform == "windows":
+    if resolved.policy.platform == "windows":
         raise PlatformNotSupported(
-            f"{tool} is not available on host {policy.hostname!r} "
+            f"{tool} is not available on host {resolved.hostname!r} "
             f"(platform=windows): {reason}. "
             f"Use an SFTP-backed tool instead (ssh_sftp_*, ssh_upload, "
             f"ssh_edit, ssh_cp, ssh_mv, ssh_mkdir, ssh_delete)."

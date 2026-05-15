@@ -10,11 +10,13 @@ continue to use relative imports because they are imported through the proper
 
 from ssh_mcp.app import mcp_server
 from ssh_mcp.tools import (  # noqa: F401  # imports register tools on the mcp_server
+    apt_tools,
     docker_tools,
     exec_tools,
+    host_notes_tools,
     host_tools,
     low_access_tools,
-    session_tools,
+    multi_host_tools,
     sftp_read_tools,
     shell_tools,
     sudo_tools,

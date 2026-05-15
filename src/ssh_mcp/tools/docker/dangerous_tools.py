@@ -6,6 +6,7 @@ Hidden unless ``ALLOW_DANGEROUS_TOOLS=true``.
 
 INC-043: extracted from the original monolithic `docker_tools.py`.
 """
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -15,10 +16,7 @@ from fastmcp import Context
 from ...app import mcp_server
 from ...services.audit import audited
 from ...services.exec_policy import check_command
-from ...services.path_policy import (
-    canonicalize_and_check,
-    effective_allowlist,
-)
+from ...services.path_policy import resolve_path
 from .._context import pool_from, resolve_host, settings_from
 from ._helpers import (
     _compose_project_op,
@@ -43,7 +41,7 @@ async def ssh_docker_exec(
     """
     _validate_name("container", container)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     check_command(command, policy, settings)
     argv = ["exec"]
     if interactive:
@@ -180,19 +178,24 @@ async def ssh_docker_compose_up(
     """
     settings = settings_from(ctx)
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn, compose_file, effective_allowlist(policy, settings),
-        must_exist=True, platform=policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    # INC-061: compose YAML is "touched" when executed (mounts volumes, runs
+    # commands), so apply restricted_paths uniformly with read/write tools.
+    canonical = await resolve_path(conn, compose_file, policy, settings, must_exist=True)
     argv = ["-f", canonical, "up"]
     if detached:
         argv.append("-d")
     if build:
         argv.append("--build")
     return await _run_docker(
-        ctx, host, argv, compose=True, compose_v1=compose_v1, timeout=timeout,
+        ctx,
+        host,
+        argv,
+        compose=True,
+        compose_v1=compose_v1,
+        timeout=timeout,
     )
 
 
@@ -212,17 +215,22 @@ async def ssh_docker_compose_down(
     """
     settings = settings_from(ctx)
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn, compose_file, effective_allowlist(policy, settings),
-        must_exist=True, platform=policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    # INC-061: compose YAML is "touched" when executed (mounts volumes, runs
+    # commands), so apply restricted_paths uniformly with read/write tools.
+    canonical = await resolve_path(conn, compose_file, policy, settings, must_exist=True)
     argv = ["-f", canonical, "down"]
     if volumes:
         argv.append("-v")
     return await _run_docker(
-        ctx, host, argv, compose=True, compose_v1=compose_v1, timeout=timeout,
+        ctx,
+        host,
+        argv,
+        compose=True,
+        compose_v1=compose_v1,
+        timeout=timeout,
     )
 
 
@@ -240,5 +248,10 @@ async def ssh_docker_compose_pull(
     standalone binary.
     """
     return await _compose_project_op(
-        ctx, host, compose_file, "pull", compose_v1=compose_v1, timeout=timeout,
+        ctx,
+        host,
+        compose_file,
+        "pull",
+        compose_v1=compose_v1,
+        timeout=timeout,
     )

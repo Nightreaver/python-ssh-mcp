@@ -12,7 +12,8 @@ cwd-sentinel approach gives us 90% of the value with none of that risk.
 
 MVP scope:
   - Tracks `cwd` only. Env-var persistence is deferred.
-  - Sessions live in memory, scoped to the lifespan. Reaped on idle.
+  - Sessions live in memory, scoped to the lifespan. Closed explicitly via
+    ``ssh_shell_close`` (no idle reaper -- caller owns lifecycle).
   - `ssh_shell_exec` runs each command through a fresh channel (no PTY).
     Concurrent calls for the same session_id would race on the cwd update
     after sentinel parsing, so each ``ShellSession`` owns an ``asyncio.Lock``
@@ -24,6 +25,7 @@ MVP scope:
     of silently racing. Read-side access to ``session.cwd`` is unlocked --
     it's a single-reference read of a str.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -133,17 +135,6 @@ class SessionRegistry:
 
     def size(self) -> int:
         return len(self._sessions)
-
-    def reap_idle(self, max_idle_seconds: int) -> list[str]:
-        """Close sessions idle past the limit; return the list of closed ids."""
-        now = time.monotonic()
-        closed: list[str] = []
-        for sid, session in list(self._sessions.items()):
-            if (now - session.last_used) > max_idle_seconds:
-                self._sessions.pop(sid, None)
-                closed.append(sid)
-                logger.info("shell session reaped id=%s (idle)", sid)
-        return closed
 
 
 def wrap_command(session: ShellSession, command: str) -> str:

@@ -4,6 +4,7 @@ Non-zero exit codes are **data**, not errors (ADR-0005). Only transport
 failures and timeouts raise. stdout/stderr are capped at configurable byte
 limits; anything past the cap is dropped and `*_truncated` is set to True.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +14,8 @@ import time
 from typing import TYPE_CHECKING
 
 from ..models.results import ExecResult
+from ..services.output_sanitizer import sanitize as _sanitize_output
+from ..services.text import as_str
 from ..telemetry import span
 from .errors import ConnectError
 
@@ -24,14 +27,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _as_str(data: bytes | bytearray | str | None) -> str:
-    if data is None:
-        return ""
-    if isinstance(data, bytes | bytearray):
-        return data.decode("utf-8", errors="replace")
-    return data
-
-
 def _truncate(data: str, cap: int) -> tuple[str, int, bool]:
     raw = data.encode("utf-8", errors="replace")
     size = len(raw)
@@ -41,13 +36,27 @@ def _truncate(data: str, cap: int) -> tuple[str, int, bool]:
     return truncated, size, True
 
 
+def _sanitize_pair(out: str, err: str) -> tuple[str, str, list[str]]:
+    """Sanitize stdout + stderr together; return cleaned text and a single
+    de-duplicated warnings list.
+
+    INC-057: every standard exec path strips ANSI / NUL and flags suspicious
+    patterns. Both ``run()`` and ``run_streaming()`` need the same merge --
+    this helper keeps the wording in one place so a future warning string
+    change doesn't drift between the two callers.
+    """
+    out_clean, out_warn = _sanitize_output(out)
+    err_clean, err_warn = _sanitize_output(err)
+    return out_clean, err_clean, list(dict.fromkeys([*out_warn, *err_warn]))
+
+
 # We deliberately don't allocate a remote PTY (see services/shell_sessions.py
 # module docstring for why). Some commands fail with a recognizable stderr
 # when no TTY is present -- detect those and surface a remediation hint so
 # the LLM doesn't burn turns guessing.
 _NO_TTY_MARKERS = (
-    "is not a tty",        # GNU coreutils / sudo
-    "stdin: not a tty",    # interactive shell
+    "is not a tty",  # GNU coreutils / sudo
+    "stdin: not a tty",  # interactive shell
     "must be run from a terminal",  # passwd, su variants
     "you must run this from a terminal",
 )
@@ -106,8 +115,10 @@ async def run(
                 timeout=timeout,
             )
         except TimeoutError:
+            # asyncssh's `conn.run` buffers internally and doesn't expose
+            # partial output when the call is cancelled by `wait_for`. For
+            # streaming partial capture, callers use `run_streaming` instead.
             duration_ms = int((time.monotonic() - start) * 1000)
-            partial = _partial_on_timeout(conn, args)
             await _kill_remote(conn, args)
             s.set_attribute("ssh.exit_code", -1)
             s.set_attribute("ssh.duration_ms", duration_ms)
@@ -115,10 +126,10 @@ async def run(
             return ExecResult(
                 host=host,
                 exit_code=-1,
-                stdout=partial.get("stdout", ""),
-                stderr=partial.get("stderr", ""),
-                stdout_bytes=len(partial.get("stdout", "").encode("utf-8")),
-                stderr_bytes=len(partial.get("stderr", "").encode("utf-8")),
+                stdout="",
+                stderr="",
+                stdout_bytes=0,
+                stderr_bytes=0,
                 duration_ms=duration_ms,
                 timed_out=True,
             )
@@ -126,12 +137,15 @@ async def run(
             raise ConnectError(f"command transport error: {exc}") from exc
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        stdout_text, stdout_raw_size, stdout_trunc = _truncate(
-            _as_str(result.stdout), stdout_cap
-        )
-        stderr_text, stderr_raw_size, stderr_trunc = _truncate(
-            _as_str(result.stderr), stderr_cap
-        )
+        stdout_text, stdout_raw_size, stdout_trunc = _truncate(as_str(result.stdout), stdout_cap)
+        stderr_text, stderr_raw_size, stderr_trunc = _truncate(as_str(result.stderr), stderr_cap)
+        # INC-057: sanitize after truncation, before the bytes leave run().
+        # Strips ANSI + NUL; flags suspicious patterns (bidi overrides,
+        # zero-width chars, C1 controls, LLM protocol markers, fake
+        # conversation turns). Warnings from both streams merge into one
+        # de-duplicated list so callers see "ANSI escape sequences stripped"
+        # once even when both stdout and stderr had ANSI.
+        stdout_text, stderr_text, output_warnings = _sanitize_pair(stdout_text, stderr_text)
 
         killed_by = None
         if getattr(result, "signal", None):
@@ -156,19 +170,8 @@ async def run(
             timed_out=False,
             killed_by_signal=killed_by,
             hint=_tty_hint_or_none(stderr_text),
+            output_warnings=output_warnings,
         )
-
-
-def _partial_on_timeout(
-    _conn: asyncssh.SSHClientConnection, _args: str
-) -> dict[str, str]:
-    """Hook point for future partial-capture-on-timeout. For now returns empty.
-
-    asyncssh's `conn.run` buffers internally and doesn't expose partial output
-    when the call is cancelled by `wait_for`. A streaming variant with
-    `create_process` can capture partials — that's ssh_exec_run_streaming.
-    """
-    return {}
 
 
 async def _kill_remote(conn: asyncssh.SSHClientConnection, args: str) -> None:
@@ -182,7 +185,7 @@ async def _kill_remote(conn: asyncssh.SSHClientConnection, args: str) -> None:
     cleanup = f"timeout 3s pkill -f -- {pattern}"
     try:
         await asyncio.wait_for(conn.run(cleanup, check=False), timeout=5.0)
-    except (TimeoutError, Exception) as exc:
+    except Exception as exc:
         logger.debug("pkill cleanup failed (ignored): %s", exc)
 
 
@@ -286,14 +289,17 @@ async def run_streaming(
         duration_ms = int((time.monotonic() - start) * 1000)
         stdout_text = stdout_buf.decode("utf-8", errors="replace")
         stderr_text = stderr_buf.decode("utf-8", errors="replace")
-        if timed_out:
-            if exit_code == -1:
-                exit_code = -1
-        else:
+        if not timed_out:
             if stdout_bytes_seen == 0:
                 stdout_bytes_seen = len(stdout_text.encode("utf-8"))
             if stderr_bytes_seen == 0:
                 stderr_bytes_seen = len(stderr_text.encode("utf-8"))
+        # INC-057: same sanitization as run(). Note: chunk_cb already saw
+        # the raw (un-sanitized) bytes during streaming -- progress
+        # messages can carry ANSI / markers. The final ExecResult.stdout
+        # is sanitized though, so the LLM's persisted view of the output
+        # never has them. Documented in the streaming SKILL.
+        stdout_text, stderr_text, output_warnings = _sanitize_pair(stdout_text, stderr_text)
 
         s.set_attribute("ssh.exit_code", exit_code)
         s.set_attribute("ssh.duration_ms", duration_ms)
@@ -313,4 +319,5 @@ async def run_streaming(
             timed_out=timed_out,
             killed_by_signal=killed_by_signal,
             hint=_tty_hint_or_none(stderr_text),
+            output_warnings=output_warnings,
         )

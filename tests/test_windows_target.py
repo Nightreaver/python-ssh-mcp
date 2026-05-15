@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from ssh_mcp.models.policy import AuthPolicy, HostPolicy
+from ssh_mcp.models.policy import AuthPolicy, HostPolicy, ResolvedHost
 from ssh_mcp.services.path_policy import (
     canonicalize,
     check_in_allowlist,
@@ -41,6 +41,11 @@ def _posix_policy(**kw: Any) -> HostPolicy:
     }
     defaults.update(kw)
     return HostPolicy(**defaults)
+
+
+def _wrap(policy: HostPolicy) -> ResolvedHost:
+    """Wrap a HostPolicy in a ResolvedHost for `require_posix` calls."""
+    return ResolvedHost(hostname=policy.hostname, policy=policy)
 
 
 # --- HostPolicy.platform ---
@@ -96,19 +101,19 @@ class TestWindowsPathAllowlist:
 
 class TestRequirePosix:
     def test_allows_posix(self) -> None:
-        require_posix(_posix_policy(), tool="ssh_foo", reason="x")  # no raise
+        require_posix(_wrap(_posix_policy()), tool="ssh_foo", reason="x")  # no raise
 
     def test_raises_on_windows(self) -> None:
         with pytest.raises(PlatformNotSupported, match="platform=windows"):
-            require_posix(_win_policy(), tool="ssh_foo", reason="uses POSIX shell")
+            require_posix(_wrap(_win_policy()), tool="ssh_foo", reason="uses POSIX shell")
 
     def test_error_names_the_tool(self) -> None:
         with pytest.raises(PlatformNotSupported, match="ssh_foo"):
-            require_posix(_win_policy(), tool="ssh_foo", reason="x")
+            require_posix(_wrap(_win_policy()), tool="ssh_foo", reason="x")
 
     def test_error_suggests_sftp_alternative(self) -> None:
         with pytest.raises(PlatformNotSupported, match="SFTP"):
-            require_posix(_win_policy(), tool="ssh_foo", reason="x")
+            require_posix(_wrap(_win_policy()), tool="ssh_foo", reason="x")
 
 
 # --- Platform-aware prefix matching (case + separators) ---

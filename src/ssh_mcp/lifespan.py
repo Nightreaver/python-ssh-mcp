@@ -32,6 +32,7 @@ ALL_GROUPS: frozenset[str] = frozenset(
         "docker",
         "shell",
         "systemctl",
+        "pkg",
     }
 )
 

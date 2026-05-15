@@ -261,12 +261,24 @@ async def _run_systemctl(
     argv: list[str],
     *,
     timeout: int | None = None,
-) -> tuple[str, str, int]:
-    """Execute an argv list on the remote host and return (stdout, stderr, exit_code)."""
+) -> tuple[str, str, int, list[str]]:
+    """Execute an argv list on the remote host and return
+    ``(stdout, stderr, exit_code, output_warnings)``.
+
+    ``output_warnings`` (INC-058) is the sanitizer's view of ``stdout`` --
+    populated by ``ssh.exec.run()`` after ANSI / NUL stripping and the
+    flag-only checks. Tools that surface raw stdout to the LLM
+    (``ssh_systemctl_status``, ``ssh_systemctl_cat``, ``ssh_journalctl``)
+    propagate this into their result model. Tools that only read the
+    parsed exit code / state token (``is-active``, ``is-enabled``,
+    ``list-units``, ``show``, ...) discard it -- their output is not
+    free-form text the LLM consumes.
+    """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
     result = await exec_run(
         conn,
         shlex.join(argv),
@@ -275,7 +287,7 @@ async def _run_systemctl(
         stdout_cap=settings.SSH_STDOUT_CAP_BYTES,
         stderr_cap=settings.SSH_STDERR_CAP_BYTES,
     )
-    return result.stdout, result.stderr, result.exit_code
+    return result.stdout, result.stderr, result.exit_code, result.output_warnings
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +419,16 @@ async def ssh_systemctl_status(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "status", "--no-pager", "--", unit]
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, output_warnings = await _run_systemctl(ctx, host, argv)
     active_state = _parse_active_state(stdout)
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return SystemctlStatusResult(
         host=policy.hostname,
         unit=unit,
         stdout=stdout,
         exit_code=exit_code,
         active_state=active_state,
+        output_warnings=output_warnings,
     ).model_dump()
 
 
@@ -434,9 +447,9 @@ async def ssh_systemctl_is_active(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "is-active", "--", unit]
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
     state = _parse_is_active_state(stdout, exit_code)
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return SystemctlIsActiveResult(
         host=policy.hostname,
         unit=unit,
@@ -460,9 +473,9 @@ async def ssh_systemctl_is_enabled(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "is-enabled", "--", unit]
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
     state = _parse_is_enabled_state(stdout)
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return SystemctlIsEnabledResult(
         host=policy.hostname,
         unit=unit,
@@ -486,10 +499,10 @@ async def ssh_systemctl_is_failed(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "is-failed", "--", unit]
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
     state = stdout.strip()
     failed = exit_code == 0
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return SystemctlIsFailedResult(
         host=policy.hostname,
         unit=unit,
@@ -544,9 +557,9 @@ async def ssh_systemctl_list_units(
     if pattern is not None:
         argv.append("--")
         argv.append(pattern)
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
     units = _parse_list_units(stdout)
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return SystemctlListUnitsResult(
         host=policy.hostname,
         units=units,
@@ -578,9 +591,9 @@ async def ssh_systemctl_show(
         _validate_property_names(properties)
         argv.append(f"--property={','.join(properties)}")
     argv.extend(["--", unit])
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
     props = _parse_show_properties(stdout)
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return SystemctlShowResult(
         host=policy.hostname,
         unit=unit,
@@ -603,13 +616,14 @@ async def ssh_systemctl_cat(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "cat", "--", unit]
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
-    policy = resolve_host(ctx, host)
+    stdout, _stderr, exit_code, output_warnings = await _run_systemctl(ctx, host, argv)
+    policy = resolve_host(ctx, host).policy
     return SystemctlCatResult(
         host=policy.hostname,
         unit=unit,
         stdout=stdout,
         exit_code=exit_code,
+        output_warnings=output_warnings,
     ).model_dump()
 
 
@@ -667,13 +681,14 @@ async def ssh_journalctl(
     if grep is not None:
         argv.extend(["--grep", grep])
 
-    stdout, _stderr, exit_code = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, output_warnings = await _run_systemctl(ctx, host, argv)
     lines_returned = len([ln for ln in stdout.splitlines() if ln])
-    policy = resolve_host(ctx, host)
+    policy = resolve_host(ctx, host).policy
     return JournalctlResult(
         host=policy.hostname,
         unit=unit,
         stdout=stdout,
         lines_returned=lines_returned,
         exit_code=exit_code,
+        output_warnings=output_warnings,
     ).model_dump()

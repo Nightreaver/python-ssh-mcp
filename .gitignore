@@ -25,4 +25,11 @@ hosts-e2e.toml
 tests/integration/keys/
 tests/integration/known_hosts
 
+# Per-host agent-written memory sidecars (INC-055). Operator-controlled
+# location via SSH_HOST_NOTES_DIR (default `notes/`). Contents are
+# operator-readable plain Markdown but the LLM writes them per-session,
+# so they're per-deployment state, not source-controlled config.
+notes/
+
 BOOTSTRAP.md
+AGENTS.md

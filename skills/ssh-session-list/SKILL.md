@@ -51,4 +51,4 @@ None specific to this tool. Returns empty if no connections are open.
 
 ## Related
 
-- [`ssh_session_stats`](../ssh-session-stats/SKILL.md) -- same data, aggregate count first.
+- [`ssh_shell_list`](../ssh-shell-list/SKILL.md) -- list persistent shell sessions (a different concept: cwd-tracking shells layered on top of pooled connections).

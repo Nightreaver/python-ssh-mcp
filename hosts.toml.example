@@ -110,6 +110,23 @@ path_allowlist = ["/opt/app", "/var/log/nginx", "/etc/nginx"]
 # Optional per-host exec scope. Without at least one of these (or a broader
 # env-level SSH_COMMAND_ALLOWLIST), exec on this host is always rejected.
 command_allowlist = ["systemctl", "nginx", "tail", "grep", "journalctl"]
+# OPERATOR notes layer (read-only to the LLM). Surfaced as
+# `operator_notes` by ssh_host_notes; flags `has_notes: true` in
+# ssh_host_list. Use this for HARD constraints that aren't expressible
+# as allowlists -- "do not install X", deployment conventions, ownership
+# / on-call routing, gotchas. The MCP server never mutates this field.
+#
+# The LLM has its OWN notes layer (`agent_notes`) at
+# <SSH_HOST_NOTES_DIR>/<alias>.md (default `notes/web01.md`). It writes
+# learned facts there itself via ssh_host_notes_append. Operator can
+# read those as plain Markdown.
+notes = """
+- Static-asset web server. NEVER install apache2 here -- nginx only.
+- Logs ship to /var/log/nginx; rotation handled by the existing logrotate
+  config (do NOT change /etc/logrotate.d/nginx).
+- Owner: platform-team@. Page #ops-platform before any restart of the
+  nginx unit.
+"""
 
 # Optional per-host health thresholds evaluated by `ssh_host_alerts`. Any
 # field you omit is not checked. Unset threshold = silently skipped.

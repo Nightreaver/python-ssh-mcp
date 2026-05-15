@@ -6,6 +6,7 @@ safe to expose by default. Mutating state lives in `lifecycle_tools`
 
 INC-043: extracted from the original monolithic `docker_tools.py`.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,10 +17,7 @@ from fastmcp import Context
 
 from ...app import mcp_server
 from ...services.audit import audited
-from ...services.path_policy import (
-    canonicalize_and_check,
-    effective_allowlist,
-)
+from ...services.path_policy import resolve_path
 from .._context import pool_from, resolve_host, settings_from
 from ._helpers import (
     _DEFAULT_LOG_MAX_BYTES,
@@ -159,9 +157,7 @@ async def ssh_docker_top(
         # can't see it. Any of |&;<>`$\n in the input is refused whether or
         # not it would survive the split.
         if any(c in ps_options for c in "|&;<>`$\n"):
-            raise ValueError(
-                f"ps_options contains shell metacharacters: {ps_options!r}"
-            )
+            raise ValueError(f"ps_options contains shell metacharacters: {ps_options!r}")
         extra = shlex.split(ps_options)
         argv.extend(extra)
     return await _run_docker(ctx, host, argv)
@@ -208,25 +204,22 @@ async def ssh_docker_events(
     """
     if not _DOCKER_TIME_RE.match(since):
         raise ValueError(
-            f"`since` must be relative (10m), epoch (1710000000), RFC3339, "
-            f"or 'now'; got {since!r}"
+            f"`since` must be relative (10m), epoch (1710000000), RFC3339, " f"or 'now'; got {since!r}"
         )
     if not _DOCKER_TIME_RE.match(until):
         raise ValueError(
-            f"`until` must be relative (10m), epoch (1710000000), RFC3339, "
-            f"or 'now'; got {until!r}"
+            f"`until` must be relative (10m), epoch (1710000000), RFC3339, " f"or 'now'; got {until!r}"
         )
     if filters:
         for f in filters:
             if not _DOCKER_FILTER_RE.match(f):
-                raise ValueError(
-                    f"filter {f!r} must match KEY=VALUE with alnum/path chars"
-                )
+                raise ValueError(f"filter {f!r} must match KEY=VALUE with alnum/path chars")
     argv = [
         "events",
         f"--since={since}",
         f"--until={until}",
-        "--format", "{{json .}}",
+        "--format",
+        "{{json .}}",
     ]
     if filters:
         for f in filters:
@@ -315,12 +308,13 @@ async def ssh_docker_compose_ps(
     """
     settings = settings_from(ctx)
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn, compose_file, effective_allowlist(policy, settings),
-        must_exist=True, platform=policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    # INC-061: even read-only compose ops respect restricted_paths so a
+    # YAML inside an SMB mount that the operator has zone-restricted is not
+    # listable here when sftp/ls of the same path is blocked.
+    canonical = await resolve_path(conn, compose_file, policy, settings, must_exist=True)
     argv = ["-f", canonical, "ps", "--format", "json"]
     result = await _run_docker(ctx, host, argv, compose=True, compose_v1=compose_v1)
     services = _parse_json_lines(result.get("stdout", ""))
@@ -354,15 +348,21 @@ async def ssh_docker_compose_logs(
         _validate_name("service", service)
     settings = settings_from(ctx)
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn, compose_file, effective_allowlist(policy, settings),
-        must_exist=True, platform=policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    # INC-061: even read-only compose ops respect restricted_paths so a
+    # YAML inside an SMB mount that the operator has zone-restricted is not
+    # listable here when sftp/ls of the same path is blocked.
+    canonical = await resolve_path(conn, compose_file, policy, settings, must_exist=True)
     argv = ["-f", canonical, "logs", f"--tail={tail}", "--no-color"]
     if service:
         argv.append(service)
     return await _run_docker(
-        ctx, host, argv, compose=True, compose_v1=compose_v1, stdout_cap=max_bytes,
+        ctx,
+        host,
+        argv,
+        compose=True,
+        compose_v1=compose_v1,
+        stdout_cap=max_bytes,
     )

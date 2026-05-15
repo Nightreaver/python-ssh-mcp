@@ -18,17 +18,41 @@ output. No shell interpolation -- safe against any string-valued input.
 
 ## Returns
 
+`HostInfoResult`:
+
+| field | type | notes |
+|---|---|---|
+| `host` | `str` | canonical hostname |
+| `uname` | `str \| None` | full `uname -a` output |
+| `os_release` | `dict[str, str]` | every `KEY=value` from `/etc/os-release` (quotes stripped) |
+| `uptime` | `str \| None` | raw `uptime` output |
+| `output_warnings` | `list[str]` | suspicious pattern warnings (see below) |
+
 ```json
 {
   "host": "web01.example.com",
   "uname": "Linux web01 6.1.0-21-amd64 #1 SMP Debian 6.1.90-1 x86_64 GNU/Linux",
   "os_release": {"NAME": "Debian GNU/Linux", "VERSION_ID": "12", "ID": "debian"},
-  "uptime": "12:34:56 up 42 days,  3:14, 2 users, load average: 0.12, 0.09, 0.05"
+  "uptime": "12:34:56 up 42 days,  3:14, 2 users, load average: 0.12, 0.09, 0.05",
+  "output_warnings": []
 }
 ```
 
 `os_release` is a flat dict of every `KEY=value` line from `/etc/os-release`
 (quotes stripped). Missing values are simply absent.
+
+### `output_warnings`
+
+After fetching, each of `uname`, `uptime`, and every `os_release` value is
+scanned by `output_sanitizer.scan()` for suspicious patterns (ANSI escape
+sequences, terminal control codes, shell metacharacters in unexpected positions,
+and similar injection-surface tokens). Matched strings are NOT modified -- the
+original text is preserved verbatim for binary safety (INC-058 pattern). When
+a pattern fires, a human-readable warning is appended to `output_warnings`. An
+empty list means the scan found nothing unusual.
+
+If `output_warnings` is non-empty, treat the accompanying field values with
+caution before rendering or further processing.
 
 ## When to call it
 

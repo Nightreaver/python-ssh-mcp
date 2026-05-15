@@ -9,6 +9,7 @@ Private surface: every name starts with `_` except the regex constants that
 tests reference directly. The facade in `../docker_tools.py` re-exports
 everything tests + external callers have historically imported.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,10 +18,7 @@ import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
-from ...services.path_policy import (
-    canonicalize_and_check,
-    effective_allowlist,
-)
+from ...services.path_policy import resolve_path
 from ...ssh.exec import run as exec_run
 from .._context import pool_from, require_posix, resolve_host, settings_from
 
@@ -42,9 +40,7 @@ _DOCKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 def _validate_name(kind: str, name: str) -> str:
     if not _DOCKER_NAME_RE.match(name):
-        raise ValueError(
-            f"invalid docker {kind} name {name!r}: must match [A-Za-z0-9][A-Za-z0-9_.-]*"
-        )
+        raise ValueError(f"invalid docker {kind} name {name!r}: must match [A-Za-z0-9][A-Za-z0-9_.-]*")
     return name
 
 
@@ -59,22 +55,28 @@ def _validate_name(kind: str, name: str) -> str:
 # unless the operator explicitly opts in via ALLOW_DOCKER_PRIVILEGED=true.
 _DOCKER_ESCALATION_PREFIXES = (
     "--privileged",
-    "--cap-add",         # any capability add -- Linux cap escalation
+    "--cap-add",  # any capability add -- Linux cap escalation
     "--pid=host",
     "--ipc=host",
     "--uts=host",
     "--userns=host",
     "--network=host",
     "--net=host",
-    "--security-opt",    # apparmor=unconfined, seccomp=unconfined, etc.
-    "--device",          # arbitrary host device access
-    "--group-add",       # e.g. adding docker/root group inside container
+    "--security-opt",  # apparmor=unconfined, seccomp=unconfined, etc.
+    "--device",  # arbitrary host device access
+    "--group-add",  # e.g. adding docker/root group inside container
 )
 # Two-token form: "--network host" equivalent to "--network=host".
-_DOCKER_NAMESPACE_FLAGS = frozenset({
-    "--pid", "--ipc", "--uts", "--userns", "--network", "--net",
-})
-_DOCKER_VOLUME_FLAGS = frozenset({"-v", "--volume", "--mount"})
+_DOCKER_NAMESPACE_FLAGS = frozenset(
+    {
+        "--pid",
+        "--ipc",
+        "--uts",
+        "--userns",
+        "--network",
+        "--net",
+    }
+)
 
 
 def _mount_source_is_host_root(mount_spec: str) -> bool:
@@ -126,9 +128,7 @@ def _reject_escalation_flags(args: list[str]) -> None:
                 )
         # Two-token form for namespace-sharing flags: `--pid host`,
         # `--pid container:<id>` (N2b).
-        if prev in _DOCKER_NAMESPACE_FLAGS and (
-            arg == "host" or arg.startswith("container:")
-        ):
+        if prev in _DOCKER_NAMESPACE_FLAGS and (arg == "host" or arg.startswith("container:")):
             raise ValueError(
                 f"ssh_docker_run refuses {prev!r} {arg!r}: shares the host "
                 f"or another container's namespace. Set "
@@ -186,7 +186,10 @@ def _docker_prefix(policy: HostPolicy, settings: Settings) -> list[str]:
 
 
 def _compose_prefix(
-    policy: HostPolicy, settings: Settings, *, v1: bool = False,
+    policy: HostPolicy,
+    settings: Settings,
+    *,
+    v1: bool = False,
 ) -> list[str]:
     """Return the argv tokens for the compose invocation on this host.
 
@@ -244,21 +247,18 @@ async def _run_docker(
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
     # All docker tools assume POSIX shell quoting via shlex.join + pkill-backed
     # timeout cleanup. Docker Desktop on Windows targets is out of scope for
     # now (see DECISIONS.md ADR-0023).
     require_posix(
-        policy,
+        resolved,
         tool="ssh_docker_*",
         reason="docker tools use POSIX shell quoting (`shlex.join`) + pkill",
     )
-    conn = await pool.acquire(policy)
-    prefix = (
-        _compose_prefix(policy, settings, v1=compose_v1)
-        if compose
-        else _docker_prefix(policy, settings)
-    )
+    conn = await pool.acquire(resolved)
+    prefix = _compose_prefix(policy, settings, v1=compose_v1) if compose else _docker_prefix(policy, settings)
     argv = [*prefix, *subargs]
     result = await exec_run(
         conn,
@@ -294,15 +294,23 @@ async def _compose_project_op(
     """Shared runner for compose subcommands that just take -f <file> <cmd>."""
     settings = settings_from(ctx)
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn, compose_file, effective_allowlist(policy, settings),
-        must_exist=True, platform=policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    # Compose YAML can mount volumes, declare ports, run init commands -- so
+    # "execute it" is a meaningful "touch" of the file. Apply the SAME path
+    # policy as every other path-bearing tool: allowlist + restricted-zones.
+    # Operators who need to compose-run from a restricted zone must move the
+    # file out or relax the restriction explicitly. INC-061.
+    canonical = await resolve_path(conn, compose_file, policy, settings, must_exist=True)
     argv = ["-f", canonical, subcommand]
     return await _run_docker(
-        ctx, host, argv, compose=True, compose_v1=compose_v1, timeout=timeout,
+        ctx,
+        host,
+        argv,
+        compose=True,
+        compose_v1=compose_v1,
+        timeout=timeout,
     )
 
 
@@ -320,10 +328,10 @@ async def _compose_project_op(
 # For longer windows, use epoch timestamps or multiply hours (`168h` = 7d).
 _DOCKER_TIME_RE = re.compile(
     r"^(?:"
-    r"\d+(?:\.\d+)?"                            # epoch (int or float)
-    r"|(?:\d+[smh])+"                           # relative (e.g. 10m, 2h, 24h30m)
-    r"|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"    # ISO datetime
-      r"(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"    # optional fractional + tz
+    r"\d+(?:\.\d+)?"  # epoch (int or float)
+    r"|(?:\d+[smh])+"  # relative (e.g. 10m, 2h, 24h30m)
+    r"|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"  # ISO datetime
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"  # optional fractional + tz
     r"|now"
     r")$",
 )
@@ -374,9 +382,7 @@ def _rewrite_stdout(result: dict[str, Any], objects: list[Any]) -> None:
     recompute byte counts. Keeps the returned ExecResult consistent with the
     parsed list after we've dropped fields from it.
     """
-    new_stdout = "\n".join(
-        json.dumps(o, separators=(",", ":")) for o in objects
-    )
+    new_stdout = "\n".join(json.dumps(o, separators=(",", ":")) for o in objects)
     if new_stdout:
         new_stdout += "\n"
     result["stdout"] = new_stdout

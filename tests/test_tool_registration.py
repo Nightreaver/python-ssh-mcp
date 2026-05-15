@@ -10,7 +10,6 @@ EXPECTED: dict[str, set[str]] = {
     "ssh_host_processes": {"safe", "read", "group:host"},
     "ssh_known_hosts_verify": {"safe", "read", "group:host"},
     "ssh_session_list": {"safe", "read", "group:session"},
-    "ssh_session_stats": {"safe", "read", "group:session"},
     "ssh_sftp_list": {"safe", "read", "group:sftp-read"},
     "ssh_sftp_stat": {"safe", "read", "group:sftp-read"},
     "ssh_sftp_download": {"safe", "read", "group:sftp-read"},

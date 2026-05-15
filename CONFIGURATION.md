@@ -281,18 +281,19 @@ Independent from tiers. Every tool carries a `group:*` tag; the `SSH_ENABLED_GRO
 
 For a per-tool reference (descriptions, inputs, skill links) see [TOOLS.md](TOOLS.md).
 
-57 tools across 8 groups:
+70 tools across 10 groups:
 
 | Group | Count | Tools |
 |---|---|---|
 | `host` | 6 | `ssh_host_ping`, `ssh_host_info`, `ssh_host_disk_usage`, `ssh_host_processes`, `ssh_host_alerts`, `ssh_known_hosts_verify` |
-| `session` | 2 | `ssh_session_list`, `ssh_session_stats` |
+| `session` | 1 | `ssh_session_list` |
 | `sftp-read` | 4 | `ssh_sftp_list`, `ssh_sftp_stat`, `ssh_sftp_download`, `ssh_find` |
 | `file-ops` | 9 | `ssh_cp`, `ssh_mv`, `ssh_mkdir`, `ssh_delete`, `ssh_delete_folder`, `ssh_edit`, `ssh_patch`, `ssh_upload`, `ssh_deploy` |
 | `exec` | 3 | `ssh_exec_run`, `ssh_exec_script`, `ssh_exec_run_streaming` |
 | `sudo` | 2 | `ssh_sudo_exec`, `ssh_sudo_run_script` |
 | `shell` | 4 | `ssh_shell_open`, `ssh_shell_exec`, `ssh_shell_close`, `ssh_shell_list` |
 | `docker` | 26 | `ssh_docker_ps/logs/inspect/stats/top/events/volumes/images/...`, `ssh_docker_cp`, `ssh_docker_compose_up/down/logs/...`, `ssh_docker_exec/run/pull/rm/rmi/prune` |
+| `pkg` | 3 | `ssh_apt_list`, `ssh_apt_search`, `ssh_apt_show` — APT package inspection (Debian/Ubuntu); POSIX-only with apt-binary probe gate |
 | `keys` | 0 | *(reserved for future key-management tools)* |
 
 Examples:

@@ -71,7 +71,6 @@ All tools are prefixed `ssh_`. Inputs are typed Pydantic models. Outputs are JSO
 | `ssh_host_processes` | fixed argv: `ps -eo pid,user,pcpu,pmem,comm --sort=-pcpu \| head -N` | Top processes |
 | `ssh_known_hosts_verify` | — | Verify a host's key against known_hosts, report fingerprint |
 | `ssh_session_list` | — | List active pooled connections |
-| `ssh_session_stats` | — | Pool stats: open count, idle age, errors |
 | `ssh_sftp_list` | SFTP `readdir` | Directory listing with `offset`/`limit` |
 | `ssh_sftp_stat` | SFTP `stat` | File metadata (size, mode, mtime, owner, symlink target) |
 | `ssh_sftp_download` | SFTP `get` | Read a remote file; base64-encoded bytes; size cap |
@@ -150,19 +149,26 @@ src/ssh_mcp/
 │   ├── path_policy.py       # canonicalize + allowlist check
 │   ├── host_policy.py       # host allowlist
 │   ├── audit.py             # structured audit events
+│   ├── text.py              # as_str() — canonical bytes/str/None → str coercion helper
 │   ├── exec_service.py
 │   ├── sftp_service.py
 │   ├── edit_service.py      # in-memory edit + patch apply
+│   ├── host_notes.py        # per-host agent-notes domain (sidecar mechanics, alias-regex defense in depth)
 │   └── sudo_service.py
 ├── models/
 │   ├── results.py           # ExecResult, StatResult, ListResult, ...
+│   ├── apt.py               # AptListResult, AptSearchResult, AptShowResult (Sprint 6)
 │   └── inputs.py            # tool input models (for typing)
+├── services/
+│   ├── apt_parser.py        # parse apt list / apt-cache search / apt-cache show output (Sprint 6)
+│   └── ...
 ├── tools/
 │   ├── __init__.py          # import submodules to register
 │   ├── host_tools.py        # ping, info, disk_usage, processes
-│   ├── session_tools.py
+│   ├── host_notes_tools.py  # agent notes read/write/append for ssh_host_notes_*
 │   ├── sftp_read_tools.py   # list, stat, download, find
 │   ├── low_access_tools.py  # cp, mv, mkdir, delete, delete_folder, edit, patch, upload
+│   ├── apt_tools.py         # ssh_apt_list, ssh_apt_search, ssh_apt_show (Sprint 6, group:pkg)
 │   ├── exec_tools.py
 │   └── sudo_tools.py
 └── telemetry.py             # OTel helpers + redaction
@@ -188,6 +194,8 @@ Transport-swap is local: if `asyncssh` ever becomes unsuitable, only the `ssh/` 
 - **Idle reaper**: background task runs every 60 s and closes connections idle > `SSH_IDLE_TIMEOUT`. Reference pattern that reaps only on next `getConnection()` leaks FDs when traffic stops — we reap proactively.
 - `close_all()` in lifespan finally block tears everything down cleanly.
 
+**Shell-session lifecycle is caller-owned.** Persistent shell sessions (`ssh_shell_open` / `ssh_shell_exec` / `ssh_shell_close`) have no idle reaper — the caller is responsible for closing sessions explicitly. `SessionRegistry` tracks open sessions but performs no background cleanup; torn-down sessions are removed only when the caller calls `ssh_shell_close` or the connection drops. This is intentional: an auto-reaper would silently discard cwd state mid-workflow.
+
 ### 5.3a ProxyJump / bastion chaining
 
 Many production SSH topologies route through a bastion (jump host). `asyncssh` supports `tunnel=<outer_connection>` to open a second connection over the first.
@@ -203,19 +211,11 @@ Many production SSH topologies route through a bastion (jump host). `asyncssh` s
 - `asyncssh` `known_hosts=` param wired through; no `None` fallback.
 - Unknown host → `UnknownHost` error with instructions to verify out-of-band. **Never auto-accept** from a tool call.
 - Mismatch → `HostKeyMismatch` with expected + actual fingerprint, logged at WARNING (security event).
-- Optional operator-only tool `ssh_known_hosts_add` (tier: low-access + a dedicated `SSH_ALLOW_KNOWN_HOSTS_WRITE=true` flag) to pin a new host after human verification. Off by default.
+- An operator-only tool `ssh_known_hosts_add` (tier: low-access) for pinning a new host after human verification would require a dedicated gate; the original `SSH_ALLOW_KNOWN_HOSTS_WRITE` flag was removed in v1.3.0 (no live caller).
 
 ### 5.5 Argv hygiene
 
-One helper in `ssh/argv.py`:
-
-```python
-def build_argv(*parts: str | Path) -> list[str]:
-    """Build a command as an argv list. No shell. No interpolation."""
-    return [str(p) for p in parts]
-```
-
-All exec calls use `asyncssh.SSHClientConnection.create_process(command=..., shell=False)` with argv lists where the protocol allows, or `run(command_as_string)` where asyncssh requires a string — in which case we construct the string via `shlex.join(argv)` and never from format-strings on untrusted input.
+Commands are built as argv lists. All exec calls use `asyncssh.SSHClientConnection.create_process(command=..., shell=False)` with argv lists where the protocol allows, or `run(command_as_string)` where asyncssh requires a string — in which case the string is produced by `shlex.join(argv)`, never from format-strings on untrusted input.
 
 Ban list (enforced by lint rule or code review):
 - `f"cmd {untrusted}"` in `ssh/` or `services/`
@@ -232,6 +232,8 @@ Ban list (enforced by lint rule or code review):
 4. Return canonical path for downstream use.
 
 All low-access tools go through this function. No tool accepts a raw path.
+
+> **For the standard chain, prefer `resolve_path(conn, path, policy, settings, must_exist=...)` — it bundles canonicalize + allowlist + restricted-zones so callers can't accidentally skip the restricted check. Reach for `canonicalize_and_check` + `check_not_restricted` directly only when you need two-sided validation (like `ssh_link`'s symlink-target check).**
 
 ### 5.7 Per-host configuration (`hosts.toml`)
 
@@ -431,14 +433,14 @@ Non-zero exit codes, stderr content, and "file not found" from user commands are
 - [ ] Timeout on every remote operation; no unbounded blocking calls
 - [ ] `timed_out` reported explicitly; `pkill -f` cleanup (borrowed from reference) with argv-escaped pattern
 - [ ] OTel spans redact command bodies; log only length, host, exit_code, duration
-- [ ] Audit event emitted for every `low-access`, `dangerous`, or `sudo` tool invocation with correlation ID
+- [ ] Audit event emitted for every tool invocation (all tiers: `read`, `low-access`, `dangerous`, `sudo`) with correlation ID
 
 ---
 
 ## 8. Observability
 
 - **OTel** spans: `ssh.connect`, `ssh.auth`, `ssh.exec`, `ssh.sftp.op`, per-tool spans wrapping everything. Attribute policy from AGENTS.md §PI-4.
-- **Audit log**: structured JSON line per mutating invocation. Fields: `ts`, `correlation_id`, `tool`, `tier`, `host`, `user`, `path_or_command_summary` (hashed, not raw), `result` (`ok`/`error`), `exit_code`, `duration_ms`.
+- **Audit log**: structured JSON line per tool invocation — every tier including read. Fields: `ts`, `correlation_id`, `tool`, `tier` (`read` / `low-access` / `dangerous` / `sudo`), `host`, `user`, `path_or_command_summary` (hashed, not raw), `result` (`ok`/`error`), `exit_code`, `duration_ms`. Read-tier volume increases proportionally to catalog size; operators can filter by `tier` in their SIEM/logging stack.
 - **Redaction**: hash any argv element that matches `--password=*`, `--token=*`, `--secret=*`; replace stdin payloads with `<len=N bytes>`.
 
 ---
@@ -477,7 +479,6 @@ class Settings(BaseSettings):
     ALLOW_LOW_ACCESS_TOOLS: bool = False
     ALLOW_DANGEROUS_TOOLS: bool = False
     ALLOW_SUDO: bool = False
-    SSH_ALLOW_KNOWN_HOSTS_WRITE: bool = False
 
     # Sudo
     SSH_SUDO_PASSWORD_CMD: str | None = None   # e.g. "pass show ops/sudo"
@@ -492,7 +493,7 @@ class Settings(BaseSettings):
     # Observability
     VERSION: str = "0.1.0"
     LOG_LEVEL: str = "INFO"
-    OTEL_ENABLED: bool = True
+    OTEL_ENABLED: bool = True   # load-bearing: gates telemetry._get_tracer; False → no spans emitted
 ```
 
 ---
@@ -505,7 +506,7 @@ class Settings(BaseSettings):
 
 **Phase 1 — read-only (2–3 days)**
 - `ssh/connection.py` + `pool.py` + `known_hosts.py`.
-- Tools: `ping`, `host_info`, `host_disk_usage`, `host_processes`, `known_hosts_verify`, `session_list`, `session_stats`, `sftp_list`, `sftp_stat`, `sftp_download`, `find`.
+- Tools: `ping`, `host_info`, `host_disk_usage`, `host_processes`, `known_hosts_verify`, `session_list`, `sftp_list`, `sftp_stat`, `sftp_download`, `find`.
 - Integration tests against a local sshd in Docker (linuxserver/openssh-server).
 
 **Phase 2 — low-access tier (2–3 days)**
@@ -558,7 +559,7 @@ Every tool carries two kinds of tag:
 | Dimension | Example tags | Gated by |
 |---|---|---|
 | **Tier** (risk) | `safe` / `low-access` / `dangerous` / `sudo` | `ALLOW_*` env flags → `Visibility` transform |
-| **Group** (domain) | `group:host` / `group:session` / `group:sftp-read` / `group:file-ops` / `group:exec` / `group:sudo` / `group:keys` | `SSH_ENABLED_GROUPS` env / `hosts.toml` → `Visibility` transform |
+| **Group** (domain) | `group:host` / `group:session` / `group:sftp-read` / `group:file-ops` / `group:exec` / `group:sudo` / `group:keys` / `group:pkg` | `SSH_ENABLED_GROUPS` env / `hosts.toml` → `Visibility` transform |
 
 Visibility is an **AND** across both dimensions: a tool must pass its tier gate AND its group gate. Either failure hides the tool.
 
@@ -574,7 +575,7 @@ Default groups (when `SSH_ENABLED_GROUPS` is empty):
 
 ```python
 DEFAULT_GROUPS = {"host", "session", "sftp-read"}   # read-only safe default
-ALL_GROUPS = {"host", "session", "sftp-read", "file-ops", "exec", "sudo", "keys"}
+ALL_GROUPS = {"host", "session", "sftp-read", "file-ops", "exec", "sudo", "keys", "pkg"}
 ```
 
 Example:

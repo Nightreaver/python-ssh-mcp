@@ -22,12 +22,9 @@ from ..models.results import (
     StatResult,
 )
 from ..services.audit import audited
-from ..services.path_policy import (
-    canonicalize_and_check,
-    check_not_restricted,
-    effective_allowlist,
-    effective_restricted_paths,
-)
+from ..services.output_sanitizer import scan as _scan_output
+from ..services.path_policy import resolve_path
+from ..services.text import as_str
 from ..ssh.errors import SSHMCPError
 from ._context import pool_from, resolve_host, settings_from
 
@@ -50,18 +47,11 @@ _WINDOWS_HASH_ALGO = {
     "sha512": "SHA512",
 }
 
-# Windows support deferred -- `_hash_windows` + `_WINDOWS_HASH_ALGO` were
-# removed in the post-review pass after code review flagged POSIX `shlex.join`
-# quoting as incompatible with Windows OpenSSH's cmd.exe / PowerShell parsing
-# (the `'"'"'` single-quote escape sequence is POSIX-shell-only). A future
-# implementation would need PowerShell's `-EncodedCommand <base64-UTF16LE>`
-# form plus a Windows-aware argv serializer. Until then, `ssh_file_hash`
-# gates via `require_posix`.
-
 _FIND_NAME_RE = re.compile(r"^[A-Za-z0-9._*?\-\[\]]{1,128}$")
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
+@audited(tier="read")
 async def ssh_sftp_list(
     host: str,
     path: str,
@@ -77,20 +67,10 @@ async def ssh_sftp_list(
 
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn,
-        path,
-        effective_allowlist(policy, settings),
-        must_exist=True,
-        platform=policy.platform,
-    )
-    check_not_restricted(
-        canonical,
-        effective_restricted_paths(policy, settings),
-        policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
 
     async with conn.start_sftp_client() as sftp:
         names = sorted(await sftp.listdir(canonical))
@@ -116,24 +96,15 @@ async def ssh_sftp_list(
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
+@audited(tier="read")
 async def ssh_sftp_stat(host: str, path: str, ctx: Context) -> StatResult:
     """Remote file/dir metadata."""
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn,
-        path,
-        effective_allowlist(policy, settings),
-        must_exist=True,
-        platform=policy.platform,
-    )
-    check_not_restricted(
-        canonical,
-        effective_restricted_paths(policy, settings),
-        policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
     async with conn.start_sftp_client() as sftp:
         attrs = await sftp.lstat(canonical)
         symlink_target: str | None = None
@@ -153,24 +124,15 @@ async def ssh_sftp_stat(host: str, path: str, ctx: Context) -> StatResult:
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
+@audited(tier="read")
 async def ssh_sftp_download(host: str, path: str, ctx: Context) -> DownloadResult:
     """Download a remote file. Size-capped; content is base64-encoded."""
     settings = settings_from(ctx)
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn,
-        path,
-        effective_allowlist(policy, settings),
-        must_exist=True,
-        platform=policy.platform,
-    )
-    check_not_restricted(
-        canonical,
-        effective_restricted_paths(policy, settings),
-        policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES  # reuse the upload cap for downloads
 
     async with conn.start_sftp_client() as sftp:
@@ -185,17 +147,33 @@ async def ssh_sftp_download(host: str, path: str, ctx: Context) -> DownloadResul
                 truncated=True,
             )
         async with sftp.open(canonical, "rb") as f:
-            data = await f.read()
+            data_raw = await f.read()
+    # asyncssh's stub for `SFTPFile.read()` is `str | bytes` even in "rb"
+    # mode; in practice it's always bytes here, but coerce defensively
+    # so both the decode-for-warnings and the b64encode-for-payload work
+    # under mypy strict without per-line ignores.
+    data: bytes = (
+        data_raw if isinstance(data_raw, bytes | bytearray) else data_raw.encode("utf-8", errors="replace")
+    )
+    # INC-058: scan a UTF-8 view for suspicious patterns (ANSI / NUL /
+    # bidi / zero-width / C1 / LLM markers / fake conversation turns).
+    # We do NOT modify the bytes -- callers may need the raw payload
+    # for binary files. The warnings list tells the LLM what a text
+    # decode would surface so it can `sanitize()` after decoding if it
+    # plans to process as text.
+    warnings = _scan_output(data.decode("utf-8", errors="replace"))
     return DownloadResult(
         host=policy.hostname,
         path=canonical,
         size=len(data),
         content_base64=base64.b64encode(data).decode("ascii"),
         truncated=False,
+        output_warnings=warnings,
     )
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
+@audited(tier="read")
 async def ssh_find(
     host: str,
     path: str,
@@ -218,20 +196,10 @@ async def ssh_find(
     depth = min(max_depth or settings.SSH_FIND_MAX_DEPTH, settings.SSH_FIND_MAX_DEPTH)
 
     pool = pool_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical_root = await canonicalize_and_check(
-        conn,
-        path,
-        effective_allowlist(policy, settings),
-        must_exist=True,
-        platform=policy.platform,
-    )
-    check_not_restricted(
-        canonical_root,
-        effective_restricted_paths(policy, settings),
-        policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical_root = await resolve_path(conn, path, policy, settings, must_exist=True)
 
     cap = settings.SSH_FIND_MAX_RESULTS
     if policy.platform == "windows":
@@ -280,7 +248,6 @@ class HashError(SSHMCPError):
     """Remote hash command failed or returned unparseable output."""
 
 
-# Validation uses the intersection of both platform dicts so a platform-only
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
 @audited(tier="read")
 async def ssh_file_hash(
@@ -321,24 +288,14 @@ async def ssh_file_hash(
     underlying transport. Bump ``timeout`` for known-large files.
     """
     if algorithm not in _POSIX_HASH_CMD:
-        raise ValueError(f"algorithm must be one of {sorted(_POSIX_HASH_CMD)}, " f"got {algorithm!r}")
+        raise ValueError(f"algorithm must be one of {sorted(_POSIX_HASH_CMD)}, got {algorithm!r}")
 
     pool = pool_from(ctx)
     settings = settings_from(ctx)
-    policy = resolve_host(ctx, host)
-    conn = await pool.acquire(policy)
-    canonical = await canonicalize_and_check(
-        conn,
-        path,
-        effective_allowlist(policy, settings),
-        must_exist=True,
-        platform=policy.platform,
-    )
-    check_not_restricted(
-        canonical,
-        effective_restricted_paths(policy, settings),
-        policy.platform,
-    )
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
 
     effective_timeout = float(timeout if timeout is not None else settings.SSH_COMMAND_TIMEOUT)
     if policy.platform == "windows":
@@ -347,7 +304,7 @@ async def ssh_file_hash(
         digest, size = await _hash_posix(conn, canonical, algorithm, effective_timeout)
 
     if not _VALID_HASH_DIGEST_RE.fullmatch(digest):
-        raise HashError(f"remote hash command returned unparseable digest {digest!r} " f"for {canonical!r}")
+        raise HashError(f"remote hash command returned unparseable digest {digest!r} for {canonical!r}")
 
     return HashResult(
         host=policy.hostname,
@@ -368,11 +325,11 @@ async def _hash_posix(
     cmd = _POSIX_HASH_CMD[algorithm]
     argv = [cmd, "--", canonical]
     result = await conn.run(shlex.join(argv), check=False, timeout=timeout)
-    stdout = _as_str(result.stdout)
-    stderr = _as_str(result.stderr)
+    stdout = as_str(result.stdout)
+    stderr = as_str(result.stderr)
     if result.exit_status != 0:
         raise HashError(
-            f"{cmd} exited {result.exit_status} for {canonical!r}: " f"{stderr.strip() or '(no stderr)'}"
+            f"{cmd} exited {result.exit_status} for {canonical!r}: {stderr.strip() or '(no stderr)'}"
         )
     # Format: "<hex>  <path>\n". Split once on whitespace; the path may
     # contain spaces which is fine because we don't parse it back out.
@@ -433,8 +390,8 @@ async def _hash_windows(
     # prompt that would otherwise hang the SSH channel.
     cmd = f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"
     result = await conn.run(cmd, check=False, timeout=timeout)
-    stdout = _as_str(result.stdout)
-    stderr = _as_str(result.stderr)
+    stdout = as_str(result.stdout)
+    stderr = as_str(result.stderr)
     # Get-FileHash returns UPPERCASE hex on its own line. Strip whitespace
     # (Windows CRLF) and lowercase to match the POSIX parser's contract.
     digest = stdout.strip().lower()
@@ -466,12 +423,6 @@ async def _stat_size(conn: asyncssh.SSHClientConnection, canonical: str) -> int:
         return int(attrs.size or 0)
     except asyncssh.Error:
         return -1
-
-
-def _as_str(data: object) -> str:
-    if isinstance(data, bytes | bytearray):
-        return data.decode(errors="replace")
-    return data if isinstance(data, str) else ""
 
 
 # ---- SFTP walk for `ssh_find` on Windows targets ----

@@ -35,9 +35,9 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
-async def test_pool_acquires_connection(pool, integration_policy) -> None:
+async def test_pool_acquires_connection(pool, integration_resolved) -> None:
     """Basic: pool opens a real connection against the container."""
-    conn = await pool.acquire(integration_policy)
+    conn = await pool.acquire(integration_resolved)
     assert conn is not None
     # Confirm the handshake really completed.
     banner = conn.get_extra_info("server_version")
@@ -45,9 +45,11 @@ async def test_pool_acquires_connection(pool, integration_policy) -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_run_returns_stdout(pool, integration_policy, integration_settings) -> None:
+async def test_exec_run_returns_stdout(
+    pool, integration_resolved, integration_policy, integration_settings
+) -> None:
     """Real remote exec: `echo hello` via our ssh/exec.run wrapper."""
-    conn = await pool.acquire(integration_policy)
+    conn = await pool.acquire(integration_resolved)
     result = await exec_run(
         conn,
         shlex.join(["echo", "hello from integration"]),
@@ -63,10 +65,10 @@ async def test_exec_run_returns_stdout(pool, integration_policy, integration_set
 
 @pytest.mark.asyncio
 async def test_exec_run_nonzero_is_data_not_failure(
-    pool, integration_policy, integration_settings
+    pool, integration_resolved, integration_policy, integration_settings
 ) -> None:
     """ADR-0005: non-zero exit is returned, not raised."""
-    conn = await pool.acquire(integration_policy)
+    conn = await pool.acquire(integration_resolved)
     result = await exec_run(
         conn,
         "false",
@@ -80,14 +82,16 @@ async def test_exec_run_nonzero_is_data_not_failure(
 
 
 @pytest.mark.asyncio
-async def test_canonicalize_and_check_rejects_out_of_scope(pool, integration_policy) -> None:
+async def test_canonicalize_and_check_rejects_out_of_scope(
+    pool, integration_resolved, integration_policy
+) -> None:
     """Real remote `realpath -m` -- verifies the path-policy helper end-to-end.
 
     Policy allows /config + /tmp. `/etc/hostname` is outside both -> PathNotAllowed.
     """
     from ssh_mcp.ssh.errors import PathNotAllowed
 
-    conn = await pool.acquire(integration_policy)
+    conn = await pool.acquire(integration_resolved)
     allowlist = integration_policy.path_allowlist
     # A path inside allowlist: should resolve cleanly.
     canonical = await canonicalize_and_check(
@@ -103,9 +107,9 @@ async def test_canonicalize_and_check_rejects_out_of_scope(pool, integration_pol
 
 
 @pytest.mark.asyncio
-async def test_sftp_list_tmp(pool, integration_policy) -> None:
+async def test_sftp_list_tmp(pool, integration_resolved) -> None:
     """SFTP listdir on /tmp -- the most basic read-only file-ops primitive."""
-    conn = await pool.acquire(integration_policy)
+    conn = await pool.acquire(integration_resolved)
     async with conn.start_sftp_client() as sftp:
         entries = await sftp.listdir("/tmp")
     # `.` and `..` may or may not show up depending on server version; the
@@ -115,8 +119,8 @@ async def test_sftp_list_tmp(pool, integration_policy) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pool_reuses_connection_for_same_key(pool, integration_policy) -> None:
+async def test_pool_reuses_connection_for_same_key(pool, integration_resolved) -> None:
     """Second acquire on the same policy returns the same underlying conn."""
-    conn_a = await pool.acquire(integration_policy)
-    conn_b = await pool.acquire(integration_policy)
+    conn_a = await pool.acquire(integration_resolved)
+    conn_b = await pool.acquire(integration_resolved)
     assert conn_a is conn_b

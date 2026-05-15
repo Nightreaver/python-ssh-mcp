@@ -23,24 +23,51 @@ wrapper is safer, faster, and better-audited than a raw shell command. When
 you reach for `ssh_exec_run`, pause and ask: **is there a dedicated tool for
 this job?**
 
-| If you're about to run...     | Use this instead                                   |
-|-------------------------------|----------------------------------------------------|
-| `mkdir -p <dir>`              | `ssh_mkdir`                                        |
-| `rm <file>`                   | `ssh_delete`                                       |
-| `rm -rf <dir>`                | `ssh_delete_folder`                                |
-| `cp -a <src> <dst>`           | `ssh_cp`                                           |
-| `mv <src> <dst>`              | `ssh_mv`                                           |
-| upload a file                 | `ssh_upload` (atomic tmp-rename, base64 payload)   |
-| in-place `sed`-style edit     | `ssh_edit` (old_text/new_text, atomic)             |
-| apply a unified diff          | `ssh_patch`                                        |
-| `find <path> -name ...`       | `ssh_find`                                         |
-| `df` / `ps` / `uname` / `uptime` | `ssh_host_disk_usage` / `_processes` / `_info`  |
-| `cat <file>`                  | `ssh_sftp_download`                                |
-| `ls <dir>`                    | `ssh_sftp_list`                                    |
-| `stat <file>`                 | `ssh_sftp_stat`                                    |
-| any `docker ...`              | `ssh_docker_*` (22 tools covering ps/logs/run/...) |
-| any `docker compose ...`      | `ssh_docker_compose_*` (7 tools)                   |
-| `sudo <anything>`             | `ssh_sudo_exec` / `ssh_sudo_run_script`            |
+### NEVER use `ssh_exec_run` for file writes
+
+The single most common misuse is `cat > path <<'EOF'`, `tee path`,
+`echo "..." > path`, and `printf "..." > path` to create or replace a
+file's content. These all have a dedicated tool (`ssh_upload` /
+`ssh_deploy` / `ssh_edit` / `ssh_patch`) that is **path-policy-checked,
+atomic, and audited with the canonical path** -- none of which
+heredoc-via-shell offers. If you find yourself writing a heredoc, STOP
+and pick from the table below.
+
+`ssh_upload` and `ssh_deploy` accept `content_text=` for plain UTF-8
+(configs, scripts, code) so you don't have to base64-encode anything --
+the encoding friction is no longer an excuse to reach for `ssh_exec_run`.
+
+### Mapping table
+
+| If you're about to run...                                 | Use this instead                                                                |
+|-----------------------------------------------------------|---------------------------------------------------------------------------------|
+| `cat > <path> <<EOF ... EOF`                              | `ssh_upload(host, path, content_text="...")`                                    |
+| `tee <path>`                                              | `ssh_upload(host, path, content_text="...")`                                    |
+| `echo "..." > <path>`                                     | `ssh_upload(host, path, content_text="...")`                                    |
+| `printf "..." > <path>`                                   | `ssh_upload(host, path, content_text="...")`                                    |
+| any "create file with X content" / "write text to a file" | `ssh_upload` (or `ssh_deploy` if you want a `.bak-<UTC>` of the previous version) |
+| `sed -i 's/old/new/' <path>`                              | `ssh_edit` (atomic, old_text/new_text)                                          |
+| `patch < <diff>`                                          | `ssh_patch` (unified diff)                                                      |
+| `mkdir -p <dir>`                                          | `ssh_mkdir`                                                                     |
+| `rm <file>`                                               | `ssh_delete`                                                                    |
+| `rm -rf <dir>`                                            | `ssh_delete_folder`                                                             |
+| `cp -a <src> <dst>`                                       | `ssh_cp`                                                                        |
+| `mv <src> <dst>`                                          | `ssh_mv`                                                                        |
+| copy a file from host A to host B                         | `ssh_transfer`                                                                  |
+| `find <path> -name ...`                                   | `ssh_find`                                                                      |
+| `md5sum` / `sha256sum` / `shaXsum`                        | `ssh_file_hash`                                                                 |
+| `df` / `ps` / `uname` / `uptime`                          | `ssh_host_disk_usage` / `_processes` / `_info`                                  |
+| `ip addr` / `ip -j addr show`                             | `ssh_host_network`                                                              |
+| `id` / `groups` / `getent passwd`                         | `ssh_user_info`                                                                 |
+| `cat <file>`                                              | `ssh_sftp_download`                                                             |
+| `ls <dir>`                                                | `ssh_sftp_list`                                                                 |
+| `stat <file>`                                             | `ssh_sftp_stat`                                                                 |
+| `systemctl status` / `is-active` / `is-enabled`           | `ssh_systemctl_*` (read tier)                                                   |
+| `journalctl -u ...`                                       | `ssh_journalctl`                                                                |
+| any `docker ...`                                          | `ssh_docker_*` (~22 tools covering ps/logs/run/...)                             |
+| any `docker compose ...`                                  | `ssh_docker_compose_*` (7 tools)                                                |
+| `sudo <anything>`                                         | `ssh_sudo_exec` / `ssh_sudo_run_script`                                         |
+| run the same command on N hosts                           | `ssh_broadcast`                                                                 |
 
 The dedicated tools are in **tiers below `dangerous`** -- they require fewer
 env flags, have narrower allowlists, and produce more targeted audit lines.

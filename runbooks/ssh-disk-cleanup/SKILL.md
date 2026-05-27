@@ -9,6 +9,17 @@ to make worse. The right order is **investigate first, prune second**;
 the wrong order destroys state you can't reconstruct. Uses `read` +
 `dangerous` tiers; dangerous steps are flagged.
 
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
+
+The `du` and `logrotate` calls below pass through `ssh_exec_run`
+cleanly -- neither has a native wrapper, and neither matches the
+cheatsheet patterns.
+
 Pair with [ssh-host-healthcheck](../ssh-host-healthcheck/SKILL.md) as
 the trigger ("`ssh_host_alerts` flagged a disk breach") and with
 [ssh-docker-incident-response](../ssh-docker-incident-response/SKILL.md)
@@ -87,7 +98,7 @@ lose data.
 Safest recovery. Rotated `.gz` files are by definition archival and
 logrotate will recreate them.
 
-Requires `ALLOW_DANGEROUS_TOOLS` (`ssh_delete` is dangerous tier):
+Requires `ALLOW_LOW_ACCESS_TOOLS` (`ssh_delete` is low-access tier):
 
 ```python
 # Example: delete nginx rotated logs older than current + .1
@@ -98,8 +109,14 @@ ssh_delete(host="web01", path="/var/log/nginx/access.log.3.gz")
 
 Do not delete the live `access.log` itself -- even if you truncate it,
 nginx holds an open fd and disk doesn't free until restart. Delete
-rotated siblings instead, then ask logrotate to rotate again
-(`ssh_exec_run "logrotate -f /etc/logrotate.d/nginx"`).
+rotated siblings instead, then ask logrotate to rotate again (requires
+`ALLOW_DANGEROUS_TOOLS` + `logrotate` in the host's `command_allowlist`):
+
+```python
+ssh_exec_run(host="web01",
+             command="logrotate -f /etc/logrotate.d/nginx",
+             timeout=30)
+```
 
 ### Branch B: Docker data-root
 
@@ -144,12 +161,15 @@ service restart.
 ## Boundaries
 
 - Sections 1-2 are read-only.
-- Section 3 requires `ALLOW_DANGEROUS_TOOLS` (`ssh_delete`,
-  `ssh_docker_prune`, `ssh_exec_run`).
+- Section 3 Branch A (rotated logs) requires `ALLOW_LOW_ACCESS_TOOLS`
+  for `ssh_delete`; the optional `logrotate -f` follow-up needs
+  `ALLOW_DANGEROUS_TOOLS` + `logrotate` allowlisted.
+- Section 3 Branch B (Docker prune) requires `ALLOW_DANGEROUS_TOOLS`
+  for `ssh_docker_prune`.
 - Branch B's volume prune and Branch C (application data) **always**
-  escalate, even with dangerous-tier flags set. The cost of a wrong
-  deletion there is hours-to-days of work; the cost of escalating is
-  minutes.
+  escalate, even with the relevant `ALLOW_*` flags set. The cost of a
+  wrong deletion there is hours-to-days of work; the cost of escalating
+  is minutes.
 - `ssh_delete_folder` (recursive) is deliberately not the first reach;
   prefer iterating `ssh_find` results + `ssh_delete` so the operator
   can see and audit each path.

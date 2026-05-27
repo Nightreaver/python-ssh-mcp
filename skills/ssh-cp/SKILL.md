@@ -11,6 +11,10 @@ flag injection). `src` must exist; `dst` may be inside an allowlisted root.
 Both paths are canonicalized on the remote and re-checked against the path
 allowlist before the shell runs.
 
+**POSIX-only.** Relies on the `cp` binary. Windows targets raise
+`PlatformNotSupported`; use `ssh_sftp_download` + `ssh_upload` as a
+cross-platform alternative.
+
 ## Inputs
 
 | name | type | required | notes |

@@ -61,10 +61,26 @@ ssh_systemctl_list_units(host="web01", pattern="nginx*")
 - When you already know the unit name -- jump straight to `ssh_systemctl_status` or `ssh_systemctl_show`.
 - When you need the full status text for a specific unit -- this returns a structured list only.
 
+## Validation
+
+- `pattern` must match `[A-Za-z0-9@._\-\*\?]+`. Anything with shell
+  metacharacters or slashes raises `ValueError`. Globs use `*` and
+  `?` only (no `[abc]` ranges).
+- `state` must match `[A-Za-z0-9-]+`. Common values:
+  `running | failed | active | inactive | exited | listening |
+  waiting | dead | activating | deactivating`.
+- `unit_type` is validated the same way as `pattern`; common values:
+  `service | timer | socket | path | mount | target | scope | slice`.
+  Anything else systemd doesn't know is returned as an empty list,
+  not an error.
+
 ## Common failures
 
 - Empty `units` list with `exit_code=0`: the filters matched nothing (e.g. `state="failed"` with no failures -- that is good news).
-- Column parse error on very old systemd (pre-v209): the `--no-legend` flag was added in v209. Practically all modern distributions are well past this.
+- Column parse error on very old systemd: the column order
+  (`UNIT LOAD ACTIVE SUB DESCRIPTION`) has been stable since v32
+  (2013) and the `--no-legend` flag has been available since v209
+  (2013). Any actively-maintained distribution is well past both.
 
 ## Related
 

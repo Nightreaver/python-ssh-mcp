@@ -49,6 +49,14 @@ bad | not-found | unknown`.
 ssh_systemctl_is_enabled(host="web01", unit="nginx.service")
 ```
 
+## Validation
+
+`unit` is rejected before the call leaves the server if it contains
+shell metacharacters, slashes, or characters outside `[A-Za-z0-9@._-]`.
+When a dot is present, the suffix must be a known unit type
+(`service | socket | target | timer | path | mount | automount |
+swap | slice | scope | device`); bare names like `nginx` are accepted.
+
 ## Common failures
 
 - `state="not-found"`: unit does not exist on the host or the name is misspelled.

@@ -7,11 +7,14 @@ description: Copy a file in or out of a container (docker cp), host-side path al
 **Tier:** low-access | **Group:** `docker` | **Tags:** `{low-access, group:docker}`
 
 Runs `docker cp` in either direction. The host-side path (`host_path`) is
-canonicalized on the remote via `realpath -m` (or SFTP realpath on Windows)
-and checked against `path_allowlist` + `restricted_paths` -- same rules as
-`ssh_cp` / `ssh_upload`. The container-side path (`container_path`) lives
-inside the container's filesystem and is NOT policy-checked -- we do not
-manage allowlists inside container images.
+canonicalized on the remote via `realpath -m` and checked against
+`path_allowlist` + `restricted_paths` -- same rules as `ssh_cp` /
+`ssh_upload`. The container-side path (`container_path`) lives inside
+the container's filesystem and is NOT policy-checked -- we do not manage
+allowlists inside container images.
+
+**POSIX-only.** Windows targets raise `PlatformNotSupported` (all docker
+tools share this gate via `_run_docker`'s `require_posix` check).
 
 Hidden unless `ALLOW_LOW_ACCESS_TOOLS=true`.
 

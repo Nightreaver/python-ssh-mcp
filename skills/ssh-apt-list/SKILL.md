@@ -43,6 +43,13 @@ caches (large -- always pair with a `pattern`).
 `"installed"`, `"installed,automatic"`, `"upgradable"`). Empty string when
 the bracket is absent.
 
+`output_warnings` (INC-057) is non-empty when the sanitizer flagged
+suspicious patterns in the apt output -- ANSI escapes, NUL bytes,
+bidi / zero-width characters, fake LLM-turn markers. Package metadata
+isn't a common injection vector, but `name` / `version` / `state`
+values still pass through; treat them with extra suspicion when this
+list is non-empty.
+
 ## Examples
 
 ```python

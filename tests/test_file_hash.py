@@ -98,6 +98,15 @@ def _ctx(policy: HostPolicy) -> Any:
 
     pool.acquire = _acquire
 
+    # INC-pool-sftp: `_stat_size` now goes through pool.sftp(resolved) instead
+    # of conn.start_sftp_client(). Wire pool.sftp to the same fake SFTP the
+    # underlying conn would produce so the existing `_FakeSFTP` and its
+    # stat_raises flag still drive `_stat_size`'s -1 sentinel branch.
+    def _pool_sftp(_resolved: Any) -> Any:
+        return conn_holder["conn"].start_sftp_client()
+
+    pool.sftp = MagicMock(side_effect=_pool_sftp)
+
     class _C:
         lifespan_context: ClassVar[dict[str, Any]] = {
             "pool": pool,
@@ -406,7 +415,7 @@ async def test_file_hash_invokes_resolve_path(monkeypatch) -> None:
     covers both halves of the path-policy chain."""
     calls: list[Any] = []
 
-    async def fake_resolve(_conn, path, policy, _settings, *, must_exist=True):
+    async def fake_resolve(_conn, path, policy, _settings, *, must_exist=True, **_kw):
         calls.append((path, must_exist, policy.platform))
         return path
 

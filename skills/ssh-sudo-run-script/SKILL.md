@@ -16,6 +16,8 @@ inspects argv tokens, and the body is on stdin. Inspect what you execute.
 
 Disabled unless **both** `ALLOW_DANGEROUS_TOOLS=true` AND `ALLOW_SUDO=true`.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | default | notes |
@@ -26,7 +28,11 @@ Disabled unless **both** `ALLOW_DANGEROUS_TOOLS=true` AND `ALLOW_SUDO=true`.
 
 ## Returns
 
-Same `ExecResult` shape as `ssh_exec_run`.
+Same `ExecResult` shape as `ssh_exec_run`, including
+[`output_warnings`](../ssh-exec-run/SKILL.md#returns) (INC-057).
+Multi-step root scripts that read or tail privileged files
+(`/var/log/auth.log`, journal entries, etc.) can pull
+attacker-influenced content into stdout -- check the field.
 
 ## When to call it
 

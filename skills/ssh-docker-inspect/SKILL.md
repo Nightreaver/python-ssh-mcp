@@ -10,6 +10,8 @@ Runs `docker inspect --type <kind> -- <target>`. Parses the JSON array and
 returns it under `objects`. Most common for container config (env, mounts,
 network aliases, healthcheck state).
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | default | notes |

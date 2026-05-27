@@ -49,6 +49,13 @@ Field provenance:
 All optional fields default to `None` / `[]` so a partial parse (package
 absent from one of the two commands) still constructs cleanly.
 
+`output_warnings` (INC-057) is non-empty when the sanitizer flagged
+suspicious patterns in the free-form text fields (`description`,
+`depends`, `recommends`, etc.). Package descriptions and dep strings
+are upstream-controlled; a hostile third-party repo could land odd
+characters here. Treat the text fields with extra suspicion when this
+list is non-empty.
+
 ## Examples
 
 ```python

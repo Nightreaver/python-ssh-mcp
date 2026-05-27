@@ -4,13 +4,17 @@ description: Run a command in a persistent shell session; cwd persists
 
 # `ssh_shell_exec`
 
-**Tier:** dangerous | **Group:** `shell` | **Tags:** `{dangerous, group:shell}`
+**Tier:** dangerous | **Group:** `shell` | **Tags:** `{dangerous, group:shell, persistent-session}`
 
 Execute `command` in the session identified by `session_id`. The session's
 stored cwd is restored at the start (`cd <cwd>`), then the command runs,
 then a sentinel reports the new `$PWD` -- the registry updates its stored
 cwd accordingly. Exit code and stderr behave identically to `ssh_exec_run`:
 non-zero exit is data, not raised.
+
+**POSIX-only.** The sentinel mechanism relies on POSIX shell (`sh`,
+`$PWD`). Windows targets raise `PlatformNotSupported` -- same gate as
+`ssh_shell_open`.
 
 Command allowlist applies (same as `ssh_exec_run`): first token checked
 against per-host `command_allowlist` + env `SSH_COMMAND_ALLOWLIST`. Empty
@@ -32,6 +36,15 @@ Extends `ExecResult` with:
 
 Sentinel line is stripped from `stdout` -- you see exactly what the command
 printed, not our tracking marker.
+
+`output_warnings` (INC-057, on the underlying `ExecResult`) is non-empty
+when the sanitizer flagged suspicious patterns in `stdout`: ANSI escapes,
+NUL bytes, bidi / zero-width characters, fake LLM-turn markers, or other
+prompt-injection patterns. Persistent shells are a particularly attractive
+injection surface -- anything an attacker can write to `$PWD`-bearing
+output (motd, prompt customization, file-listing output) feeds back into
+the LLM on every subsequent call against the same session. Treat stdout
+with extra suspicion when this list is non-empty.
 
 ## When to call it
 

@@ -10,10 +10,31 @@ realpath (protocol-level, platform-agnostic) with a python-side `ntpath`
 fallback for paths that don't yet exist; allowlist prefix matching uses
 case-folded forward-slash form on Windows so `C:\\opt\\app` matches either
 ``C:\\OPT\\APP\\file`` or ``C:/opt/app/file`` equivalently.
+
+POSIX chrooted-SFTP fallback (INC-063):
+
+Some sshd configs run the SFTP subsystem in a chroot while the SSH session
+channel (used by ``conn.run``) sees the real filesystem (DSM 7.x internal-
+sftp is the canonical case). On such hosts the LLM gets paths from SFTP
+discovery (``ssh_sftp_list("/")`` returns chroot-view paths like
+``/docker/...``) but ``_canonicalize_posix`` running shell ``realpath`` on
+the SSH channel sees a different view (``/volume1/docker/...``) and ENOENTs
+on every path the LLM produces.
+
+To unblock SFTP-backed tools on these hosts, ``_canonicalize_posix`` falls
+back to ``sftp.realpath`` (SSH_FXP_REALPATH) when shell realpath fails.
+The SFTP realpath runs inside the SFTP subsystem's view, so its answer
+matches what subsequent SFTP I/O (``sftp.open`` / ``sftp.stat`` / etc.)
+will see. A WARNING line on this logger signals the operator that the
+fallback fired -- typical fix is to disable the chroot server-side, or
+treat shell-backed tools (``ssh_cp``, ``ssh_delete_folder``'s rm fallback,
+``ssh_mv`` cross-fs fallback) as expected to fail on chroot-view paths.
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import ntpath
 import posixpath
 import shlex
@@ -24,9 +45,14 @@ import asyncssh
 from ..ssh.errors import PathNotAllowed, PathRestricted
 from ..telemetry import span
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ..config import Settings
     from ..models.policy import HostPolicy
+    from ..ssh.pool import ConnectionPool
 
 Platform = Literal["posix", "windows"]
 
@@ -157,6 +183,8 @@ async def canonicalize(
     *,
     must_exist: bool,
     platform: Platform = "posix",
+    pool: ConnectionPool | None = None,
+    policy: HostPolicy | None = None,
 ) -> str:
     """Canonicalize `path` on the remote and return the canonical form.
 
@@ -169,11 +197,24 @@ async def canonicalize(
     ``ntpath.normpath`` and require the result to be absolute. Symlink
     escape via a non-resolving fallback is a weaker guarantee than POSIX
     gives us -- documented in ADR-0023.
+
+    ``pool`` + ``policy`` are optional and only consulted on the Windows
+    branch -- they route the SFTP realpath probe through the pool's cached
+    SFTPClient so we share the same subsystem channel as the rest of the
+    tool surface (avoids opening a fresh SFTP channel per path resolve,
+    which on DSM-style servers exhausts MaxSessions). Both must be passed
+    together or both omitted; passing one without the other raises
+    ``TypeError`` rather than silently falling back -- half-contract calls
+    used to degrade invisibly, which masked bugs at the call site.
+    Omitting both falls back to a per-call ``conn.start_sftp_client()``
+    (legacy path, kept for docker tools and tests that don't have a pool
+    handy).
     """
+    _check_pool_policy_pair(pool, policy)
     reject_bad_characters(path)
     if platform == "windows":
-        return await _canonicalize_windows(conn, path, must_exist=must_exist)
-    return await _canonicalize_posix(conn, path, must_exist=must_exist)
+        return await _canonicalize_windows(conn, path, must_exist=must_exist, pool=pool, policy=policy)
+    return await _canonicalize_posix(conn, path, must_exist=must_exist, pool=pool, policy=policy)
 
 
 async def _canonicalize_posix(
@@ -181,6 +222,8 @@ async def _canonicalize_posix(
     path: str,
     *,
     must_exist: bool,
+    pool: ConnectionPool | None = None,
+    policy: HostPolicy | None = None,
 ) -> str:
     # GNU realpath modes:
     #   default: parent must exist; leaf may not
@@ -204,13 +247,100 @@ async def _canonicalize_posix(
         stdout = stdout.decode(errors="replace")
     if isinstance(stderr, bytes | bytearray):
         stderr = stderr.decode(errors="replace")
+    # asyncssh can hand back None when the stream stayed empty -- coerce to
+    # "" so downstream ``.strip()`` calls don't blow up.
+    stdout = stdout or ""
+    stderr = stderr or ""
     if result.exit_status != 0:
-        raise PathNotAllowed(f"cannot canonicalize {path!r}: {stderr.strip()}")
+        # Shell `realpath` failed. Before giving up, try the SFTP-protocol
+        # REALPATH (asyncssh's ``sftp.realpath``) as a fallback. On hosts
+        # with chrooted SFTP (DSM internal-sftp, OPNsense, some appliances),
+        # the SSH session channel sees the real filesystem view (e.g.
+        # ``/volume1/docker/...``) while the SFTP subsystem sees the
+        # chroot view (e.g. ``/docker/...``). The LLM gets paths from SFTP
+        # discovery (``ssh_sftp_list``), so canonicalizing those against
+        # the shell view will always ENOENT under chroot -- but the SFTP
+        # view will resolve them correctly, and SFTP-backed tools that
+        # consume the canonical path will operate in the same view.
+        sftp_canonical = await _try_sftp_realpath(conn, path, pool, policy)
+        if sftp_canonical is not None:
+            # ``realpath -m`` (must_exist=False) tolerates missing leaves.
+            # If the caller wanted strict existence, double-check via
+            # ``sftp.stat`` so the contract still holds on the chroot path.
+            if must_exist:
+                stat_ok = await _try_sftp_stat(conn, sftp_canonical, pool, policy)
+                if not stat_ok:
+                    raise PathNotAllowed(
+                        f"cannot canonicalize {path!r}: shell realpath says "
+                        f"{stderr.strip() or '(no stderr)'}; SFTP realpath "
+                        f"resolved to {sftp_canonical!r} but sftp.stat says "
+                        f"it does not exist."
+                    )
+            logger.warning(
+                "shell realpath failed for %r (%s); used SFTP-protocol "
+                "realpath fallback -> %r. Likely chrooted SFTP -- shell and "
+                "SFTP see different filesystem views on this host. "
+                "Shell-backed tools (ssh_cp / ssh_mv cross-fs / ssh_delete_folder "
+                "rm -rf fallback) may still fail on this path; use ssh_exec_run "
+                "or fix the server's SFTP chroot config.",
+                path,
+                stderr.strip() or "(no stderr)",
+                sftp_canonical,
+            )
+            return sftp_canonical
+        raise PathNotAllowed(
+            f"cannot canonicalize {path!r}: shell realpath says "
+            f"{stderr.strip() or '(no stderr)'}; SFTP-protocol realpath "
+            f"fallback also failed. If this host runs chrooted SFTP, even "
+            f"the SFTP subsystem could not resolve the path."
+        )
 
     canonical = stdout.strip()
     if not canonical.startswith("/"):
         raise PathNotAllowed(f"realpath returned non-absolute path: {canonical!r}")
     return canonical
+
+
+async def _try_sftp_realpath(
+    conn: asyncssh.SSHClientConnection,
+    path: str,
+    pool: ConnectionPool | None,
+    policy: HostPolicy | None,
+) -> str | None:
+    """Best-effort SFTP-protocol REALPATH. Returns the resolved path or
+    ``None`` on any SFTP-layer failure.
+
+    Used as the chroot fallback in :func:`_canonicalize_posix`. Swallows
+    ``asyncssh.Error`` (base class) rather than only ``SFTPError`` so a
+    pure transport failure during the probe degrades to ``None`` -- the
+    caller then re-raises the original shell-realpath error.
+    """
+    try:
+        async with _sftp_for_canonicalize(conn, pool, policy) as sftp:
+            resolved = await sftp.realpath(path)
+        if isinstance(resolved, bytes | bytearray):
+            resolved = resolved.decode(errors="replace")
+        resolved_str = str(resolved).strip()
+        if not resolved_str or not resolved_str.startswith("/"):
+            return None
+        return resolved_str
+    except asyncssh.Error:
+        return None
+
+
+async def _try_sftp_stat(
+    conn: asyncssh.SSHClientConnection,
+    path: str,
+    pool: ConnectionPool | None,
+    policy: HostPolicy | None,
+) -> bool:
+    """Best-effort ``sftp.stat``. ``True`` iff the path resolves cleanly."""
+    try:
+        async with _sftp_for_canonicalize(conn, pool, policy) as sftp:
+            await sftp.stat(path)
+        return True
+    except asyncssh.Error:
+        return False
 
 
 def _is_windows_absolute(path: str) -> bool:
@@ -220,59 +350,111 @@ def _is_windows_absolute(path: str) -> bool:
     return bool(path.startswith("\\\\") or path.startswith("//"))
 
 
+def _check_pool_policy_pair(
+    pool: ConnectionPool | None,
+    policy: HostPolicy | None,
+) -> None:
+    """Enforce the both-or-neither contract for the ``pool`` + ``policy`` pair.
+
+    Half-contract calls (one supplied, the other ``None``) silently fell
+    back to the per-call SFTP channel in earlier revisions, which masked
+    the bug. We raise ``TypeError`` so the offending call site fails loudly
+    and is fixed at its source rather than degrading invisibly.
+    """
+    if (pool is None) != (policy is None):
+        raise TypeError(
+            "canonicalize: pool and policy must be passed together "
+            f"(pool={'set' if pool is not None else 'None'}, "
+            f"policy={'set' if policy is not None else 'None'}). "
+            "Pass both for pool-cached SFTP, or neither for the legacy "
+            "per-call channel fallback."
+        )
+
+
+@contextlib.asynccontextmanager
+async def _sftp_for_canonicalize(
+    conn: asyncssh.SSHClientConnection,
+    pool: ConnectionPool | None,
+    policy: HostPolicy | None,
+) -> AsyncIterator[asyncssh.SFTPClient]:
+    """Yield an SFTPClient for canonicalization -- pool-cached when
+    possible, fall back to a per-call channel when no pool is threaded in.
+
+    The fallback exists so docker tools (which don't yet pass ``pool``)
+    keep working, and so tests that build a mock ``conn`` without a pool
+    can still exercise the windows branch. The both-or-neither contract
+    is enforced at the public entry point (``canonicalize``); by the time
+    we reach here, the pair has already been validated.
+    """
+    if pool is not None and policy is not None:
+        async with pool.sftp_policy(policy) as sftp:
+            yield sftp
+        return
+    async with conn.start_sftp_client() as sftp:
+        yield sftp
+
+
 async def _canonicalize_windows(
     conn: asyncssh.SSHClientConnection,
     path: str,
     *,
     must_exist: bool,
+    pool: ConnectionPool | None = None,
+    policy: HostPolicy | None = None,
 ) -> str:
-    # SFTP realpath -- works regardless of remote OS and respects existing
-    # symlinks. Servers that refuse realpath on non-existing targets fall
-    # through to the ntpath fallback below.
-    try:
-        async with conn.start_sftp_client() as sftp:
-            canonical_raw = await sftp.realpath(path)
-    except asyncssh.SFTPError:
-        canonical_raw = None
-
-    if canonical_raw is None:
-        # Python-side fallback: `ntpath.normpath` folds `..`, unifies slashes.
-        # Does NOT resolve symlinks -- on Windows we accept this weaker
-        # guarantee for non-existing paths (upload / mkdir targets).
-        if not _is_windows_absolute(path):
-            raise PathNotAllowed(f"path {path!r} is not absolute; expected `C:\\...` or `C:/...`")
-        canonical_raw = ntpath.normpath(path)
-
-    if isinstance(canonical_raw, bytes):
-        canonical_raw = canonical_raw.decode(errors="replace")
-    canonical = str(canonical_raw)
-    # OpenSSH-for-Windows' SFTP subsystem returns realpath in Cygwin/WSL form:
-    # `C:\Users` comes back as `/C:/Users`. Strip the spurious leading `/` so
-    # the result lines up with `_is_windows_absolute` (and with user-supplied
-    # paths which use the native drive form).
-    #
-    # UNC (`\\host\share` or `//host/share`) is intentionally left intact --
-    # it's already absolute under `_is_windows_absolute`, and admin-share
-    # forms like `//host/C$/...` share no prefix shape with `/C:/...` so the
-    # strip below can't fire on them.
-    if (
-        len(canonical) >= 4
-        and canonical[0] == "/"
-        and canonical[2:4] in (":/", ":\\")
-        and canonical[1].isalpha()
-    ):
-        canonical = canonical[1:]
-    if not _is_windows_absolute(canonical):
-        raise PathNotAllowed(f"canonicalized path is not absolute: {canonical!r}")
-
-    if must_exist:
-        # Double-check via SFTP stat so the same "must exist" semantics apply
-        # on Windows as POSIX (realpath alone may succeed on a phantom path).
+    # One SFTPClient for both the realpath probe and the (optional) must-exist
+    # stat. In the pool-cached path both ops share the same multiplexed channel
+    # already; in the fallback path (no pool, e.g. docker tools and tests) this
+    # avoids opening TWO SFTP subsystem channels per canonicalize call. The
+    # extra ntpath/string fixup inside the with-block holds the client open for
+    # microseconds -- negligible -- and keeps the success path one
+    # async-context-manager entry instead of two.
+    async with _sftp_for_canonicalize(conn, pool, policy) as sftp:
+        # SFTP realpath -- works regardless of remote OS and respects existing
+        # symlinks. Servers that refuse realpath on non-existing targets fall
+        # through to the ntpath fallback below.
         try:
-            async with conn.start_sftp_client() as sftp:
+            canonical_raw = await sftp.realpath(path)
+        except asyncssh.SFTPError:
+            canonical_raw = None
+
+        if canonical_raw is None:
+            # Python-side fallback: `ntpath.normpath` folds `..`, unifies slashes.
+            # Does NOT resolve symlinks -- on Windows we accept this weaker
+            # guarantee for non-existing paths (upload / mkdir targets).
+            if not _is_windows_absolute(path):
+                raise PathNotAllowed(f"path {path!r} is not absolute; expected `C:\\...` or `C:/...`")
+            canonical_raw = ntpath.normpath(path)
+
+        if isinstance(canonical_raw, bytes):
+            canonical_raw = canonical_raw.decode(errors="replace")
+        canonical = str(canonical_raw)
+        # OpenSSH-for-Windows' SFTP subsystem returns realpath in Cygwin/WSL form:
+        # `C:\Users` comes back as `/C:/Users`. Strip the spurious leading `/` so
+        # the result lines up with `_is_windows_absolute` (and with user-supplied
+        # paths which use the native drive form).
+        #
+        # UNC (`\\host\share` or `//host/share`) is intentionally left intact --
+        # it's already absolute under `_is_windows_absolute`, and admin-share
+        # forms like `//host/C$/...` share no prefix shape with `/C:/...` so the
+        # strip below can't fire on them.
+        if (
+            len(canonical) >= 4
+            and canonical[0] == "/"
+            and canonical[2:4] in (":/", ":\\")
+            and canonical[1].isalpha()
+        ):
+            canonical = canonical[1:]
+        if not _is_windows_absolute(canonical):
+            raise PathNotAllowed(f"canonicalized path is not absolute: {canonical!r}")
+
+        if must_exist:
+            # Double-check via SFTP stat so the same "must exist" semantics apply
+            # on Windows as POSIX (realpath alone may succeed on a phantom path).
+            try:
                 await sftp.stat(canonical)
-        except asyncssh.SFTPError as exc:
-            raise PathNotAllowed(f"cannot canonicalize {path!r}: {exc}") from exc
+            except asyncssh.SFTPError as exc:
+                raise PathNotAllowed(f"cannot canonicalize {path!r}: {exc}") from exc
     return canonical
 
 
@@ -283,8 +465,17 @@ async def canonicalize_and_check(
     *,
     must_exist: bool = True,
     platform: Platform = "posix",
+    pool: ConnectionPool | None = None,
+    policy: HostPolicy | None = None,
 ) -> str:
-    """Canonicalize on the remote and verify the result is allowlisted."""
+    """Canonicalize on the remote and verify the result is allowlisted.
+
+    ``pool`` + ``policy`` forwarded to :func:`canonicalize`; see its
+    docstring for the rationale (Windows SFTP realpath uses the pool's
+    cached SFTPClient when available). The both-or-neither contract is
+    enforced here too -- passing one without the other raises ``TypeError``.
+    """
+    _check_pool_policy_pair(pool, policy)
     # Telemetry: path content can be sensitive (user-supplied), so attach
     # `path_len` only. `allowlist_len` is operator config, useful for spotting
     # hosts that lost their allowlist after a config reload.
@@ -297,7 +488,14 @@ async def canonicalize_and_check(
             "path.allowlist_len": len(allowlist),
         },
     ) as s:
-        canonical = await canonicalize(conn, path, must_exist=must_exist, platform=platform)
+        canonical = await canonicalize(
+            conn,
+            path,
+            must_exist=must_exist,
+            platform=platform,
+            pool=pool,
+            policy=policy,
+        )
         check_in_allowlist(canonical, allowlist, platform)
         s.set_attribute("path.canonical_len", len(canonical))
         return canonical
@@ -310,11 +508,17 @@ async def resolve_path(
     settings: Settings,
     *,
     must_exist: bool = True,
+    pool: ConnectionPool | None = None,
 ) -> str:
     """Canonicalize ``path``, enforce allowlist + restricted-zones in one shot.
 
     Bundles the standard low-access path resolution chain so callers can't
     accidentally skip the restricted-paths check. Returns the canonical path.
+
+    ``pool`` (optional): when threaded in, the Windows SFTP realpath probe
+    uses the pool's cached SFTPClient instead of opening a fresh channel
+    per call. POSIX targets ignore it. Callers in SFTP-heavy paths
+    (low_access_tools, sftp_read_tools, multi_host_tools) should pass it.
     """
     canonical = await canonicalize_and_check(
         conn,
@@ -322,6 +526,8 @@ async def resolve_path(
         effective_allowlist(policy, settings),
         must_exist=must_exist,
         platform=policy.platform,
+        pool=pool,
+        policy=policy,
     )
     check_not_restricted(
         canonical,

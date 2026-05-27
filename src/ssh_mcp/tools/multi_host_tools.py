@@ -263,6 +263,7 @@ async def ssh_transfer(
         src_policy,
         settings,
         must_exist=True,
+        pool=pool,
     )
     dst_canonical = await resolve_path(
         dst_conn,
@@ -270,6 +271,7 @@ async def ssh_transfer(
         dst_policy,
         settings,
         must_exist=False,
+        pool=pool,
     )
 
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
@@ -278,9 +280,13 @@ async def ssh_transfer(
     start = time.monotonic()
     bytes_transferred = 0
     src_size = 0
+    # Two independent pool keys -- nest the context managers so each side's
+    # invalidate-on-channel-failure semantics fire on the correct key. The
+    # SFTPClient instances are pool-cached and (per Phase 2) shared across
+    # concurrent SFTP-using tools on the same host.
     async with (
-        src_conn.start_sftp_client() as src_sftp,
-        dst_conn.start_sftp_client() as dst_sftp,
+        pool.sftp(src_resolved) as src_sftp,
+        pool.sftp(dst_resolved) as dst_sftp,
     ):
         # Size check up front -- avoid starting a copy the cap will reject.
         attrs = await src_sftp.stat(src_canonical)

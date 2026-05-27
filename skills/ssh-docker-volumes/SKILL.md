@@ -17,6 +17,8 @@ Two modes in one tool, discriminated by the `name` argument:
 
 Volume name is argv-validated against the Docker naming rule.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | default | notes |

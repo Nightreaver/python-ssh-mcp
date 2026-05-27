@@ -35,6 +35,13 @@ Same guards as `ssh_docker_logs` plus a service filter:
 
 `ExecResult`. Logs are in `stdout`. Check `stdout_truncated=true`.
 
+`output_warnings` (INC-057) is non-empty when the sanitizer flagged
+suspicious patterns: ANSI escapes, NUL bytes, bidi / zero-width
+characters, fake LLM-turn markers. Compose logs interleave output from
+every service in the project -- any one of them with a tampered
+container image can poison the combined stream. Treat stdout with
+extra suspicion when this list is non-empty.
+
 ## When to call it
 
 - Follow a multi-service incident end-to-end.

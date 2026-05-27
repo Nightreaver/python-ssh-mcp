@@ -1,13 +1,19 @@
-"""Systemctl / journalctl read tools over SSH. Safe tier — no mutations.
+"""Systemctl / journalctl tools over SSH.
 
-All tools are tagged ``{"safe", "read", "group:systemctl"}`` and work
-without sudo on any stock Linux host running systemd.
+Read tier (no mutations) is tagged ``{"safe", "read", "group:systemctl"}``
+and works without sudo on any stock Linux host running systemd. The
+read-tier surface covers ``status``, ``is-active``, ``is-enabled``,
+``is-failed``, ``list-units``, ``show``, ``cat``, and ``journalctl``.
 
-Lifecycle operations (start / stop / restart / reload / enable / disable /
-daemon-reload) intentionally have no dedicated tools here. They require root
-and should be invoked via ``ssh_sudo_exec systemctl <cmd>`` with
-``ALLOW_SUDO=true`` + ``ALLOW_DANGEROUS_TOOLS=true``. The operator runbook at
-``runbooks/ssh-systemd-diagnostics/SKILL.md`` has worked examples.
+Mutation tier (``start``, ``stop``, ``restart``, ``reload``, ``enable``,
+``disable``, ``mask``, ``unmask``, ``reset-failed``) is tagged
+``{"dangerous", "group:systemctl"}`` and hidden unless
+``ALLOW_DANGEROUS_TOOLS=true``. These tools do NOT auto-prepend ``sudo`` --
+matching the read-tier and apt-tier convention. They require root on the
+target: use a sudoers-enabled SSH account, or invoke ``ssh_sudo_exec
+systemctl <verb> <unit>`` if you need an interactive sudo gate. The
+operator runbook at ``runbooks/ssh-systemd-diagnostics/SKILL.md`` has
+worked examples.
 
 Input safety
 ------------
@@ -28,7 +34,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from typing import cast
+from typing import cast, get_args
 
 from fastmcp import Context
 
@@ -44,6 +50,8 @@ from ..models.systemctl import (
     SystemctlListUnitsResult,
     SystemctlShowResult,
     SystemctlStatusResult,
+    SystemctlUnitAction,
+    SystemctlUnitActionResult,
     SystemctlUnitEntry,
 )
 from ..services.audit import audited
@@ -261,9 +269,13 @@ async def _run_systemctl(
     argv: list[str],
     *,
     timeout: int | None = None,
-) -> tuple[str, str, int, list[str]]:
+) -> tuple[str, str, int, list[str], str]:
     """Execute an argv list on the remote host and return
-    ``(stdout, stderr, exit_code, output_warnings)``.
+    ``(stdout, stderr, exit_code, output_warnings, hostname)``.
+
+    ``hostname`` is the canonical hostname from the resolved host policy --
+    returned so callers can stamp it onto their result model without a
+    second ``resolve_host`` round-trip.
 
     ``output_warnings`` (INC-058) is the sanitizer's view of ``stdout`` --
     populated by ``ssh.exec.run()`` after ANSI / NUL stripping and the
@@ -287,7 +299,13 @@ async def _run_systemctl(
         stdout_cap=settings.SSH_STDOUT_CAP_BYTES,
         stderr_cap=settings.SSH_STDERR_CAP_BYTES,
     )
-    return result.stdout, result.stderr, result.exit_code, result.output_warnings
+    return (
+        result.stdout,
+        result.stderr,
+        result.exit_code,
+        result.output_warnings,
+        policy.hostname,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -419,11 +437,10 @@ async def ssh_systemctl_status(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "status", "--no-pager", "--", unit]
-    stdout, _stderr, exit_code, output_warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, output_warnings, hostname = await _run_systemctl(ctx, host, argv)
     active_state = _parse_active_state(stdout)
-    policy = resolve_host(ctx, host).policy
     return SystemctlStatusResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         stdout=stdout,
         exit_code=exit_code,
@@ -447,11 +464,10 @@ async def ssh_systemctl_is_active(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "is-active", "--", unit]
-    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings, hostname = await _run_systemctl(ctx, host, argv)
     state = _parse_is_active_state(stdout, exit_code)
-    policy = resolve_host(ctx, host).policy
     return SystemctlIsActiveResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         state=state,
         exit_code=exit_code,
@@ -473,11 +489,10 @@ async def ssh_systemctl_is_enabled(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "is-enabled", "--", unit]
-    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings, hostname = await _run_systemctl(ctx, host, argv)
     state = _parse_is_enabled_state(stdout)
-    policy = resolve_host(ctx, host).policy
     return SystemctlIsEnabledResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         state=state,
         exit_code=exit_code,
@@ -499,12 +514,11 @@ async def ssh_systemctl_is_failed(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "is-failed", "--", unit]
-    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings, hostname = await _run_systemctl(ctx, host, argv)
     state = stdout.strip()
     failed = exit_code == 0
-    policy = resolve_host(ctx, host).policy
     return SystemctlIsFailedResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         failed=failed,
         state=state,
@@ -557,11 +571,10 @@ async def ssh_systemctl_list_units(
     if pattern is not None:
         argv.append("--")
         argv.append(pattern)
-    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings, hostname = await _run_systemctl(ctx, host, argv)
     units = _parse_list_units(stdout)
-    policy = resolve_host(ctx, host).policy
     return SystemctlListUnitsResult(
-        host=policy.hostname,
+        host=hostname,
         units=units,
         exit_code=exit_code,
     ).model_dump()
@@ -591,11 +604,10 @@ async def ssh_systemctl_show(
         _validate_property_names(properties)
         argv.append(f"--property={','.join(properties)}")
     argv.extend(["--", unit])
-    stdout, _stderr, exit_code, _warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, _warnings, hostname = await _run_systemctl(ctx, host, argv)
     props = _parse_show_properties(stdout)
-    policy = resolve_host(ctx, host).policy
     return SystemctlShowResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         properties=props,
         exit_code=exit_code,
@@ -616,10 +628,9 @@ async def ssh_systemctl_cat(
     """
     _validate_systemd_unit_name(unit)
     argv = ["systemctl", "cat", "--", unit]
-    stdout, _stderr, exit_code, output_warnings = await _run_systemctl(ctx, host, argv)
-    policy = resolve_host(ctx, host).policy
+    stdout, _stderr, exit_code, output_warnings, hostname = await _run_systemctl(ctx, host, argv)
     return SystemctlCatResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         stdout=stdout,
         exit_code=exit_code,
@@ -681,14 +692,189 @@ async def ssh_journalctl(
     if grep is not None:
         argv.extend(["--grep", grep])
 
-    stdout, _stderr, exit_code, output_warnings = await _run_systemctl(ctx, host, argv)
+    stdout, _stderr, exit_code, output_warnings, hostname = await _run_systemctl(ctx, host, argv)
     lines_returned = len([ln for ln in stdout.splitlines() if ln])
-    policy = resolve_host(ctx, host).policy
     return JournalctlResult(
-        host=policy.hostname,
+        host=hostname,
         unit=unit,
         stdout=stdout,
         lines_returned=lines_returned,
         exit_code=exit_code,
         output_warnings=output_warnings,
     ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Mutation tools (dangerous tier)
+#
+# All nine carry the ``{"dangerous", "group:systemctl"}`` tagset and
+# ``@audited(tier="dangerous")``. Sudo is NOT auto-prepended -- matching the
+# read-tier and apt-tier convention. Each tool runs ``systemctl <verb> -- <unit>``
+# argv-style (``shlex.join`` later) so the unit name can never reach a shell as
+# anything but a single literal token. Non-zero exit codes are returned as data
+# in ``exit_code``; only transport failures escape the tool.
+# ---------------------------------------------------------------------------
+
+
+# Verbs accepted by the shared mutation runner. Derived from
+# ``SystemctlUnitAction`` so the Literal is the single source of truth -- mypy
+# already enforces the per-call-site verb at compile-time; this frozenset is
+# the runtime tripwire for any non-typed caller (e.g. ``TestDispatchVerbGuard``).
+_MUTATION_VERBS: frozenset[str] = frozenset(get_args(SystemctlUnitAction))
+
+
+async def _run_unit_action(
+    ctx: Context,
+    host: str,
+    *,
+    verb: SystemctlUnitAction,
+    unit: str,
+    timeout: int | None,
+) -> dict[str, object]:
+    """Validate ``unit``, run ``systemctl <verb> -- <unit>`` on ``host``, and
+    return a ``SystemctlUnitActionResult`` as a plain dict.
+
+    Shared body for the nine dangerous-tier mutation tools. ``verb`` is typed
+    against the ``SystemctlUnitAction`` Literal so mypy catches typos at the
+    call sites; the runtime frozenset check below is the defensive tripwire
+    for non-typed callers.
+    """
+    if verb not in _MUTATION_VERBS:
+        # Defensive: caller bug, not user input. Surface as ValueError so
+        # tests catch a typo before it reaches the wire.
+        raise ValueError(f"unsupported systemctl mutation verb: {verb!r}")
+    _validate_systemd_unit_name(unit)
+    argv = ["systemctl", verb, "--", unit]
+    stdout, stderr, exit_code, output_warnings, hostname = await _run_systemctl(
+        ctx,
+        host,
+        argv,
+        timeout=timeout,
+    )
+    return SystemctlUnitActionResult(
+        host=hostname,
+        unit=unit,
+        action=verb,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        output_warnings=output_warnings,
+    ).model_dump()
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_start(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl start <unit>`` on the host. Requires root (use a sudoers-enabled
+    SSH account or ``ssh_sudo_exec``). See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="start", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_stop(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl stop <unit>`` on the host. Requires root (use a sudoers-enabled
+    SSH account or ``ssh_sudo_exec``). See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="stop", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_restart(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl restart <unit>`` on the host. Requires root (use a sudoers-enabled
+    SSH account or ``ssh_sudo_exec``). See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="restart", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_reload(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl reload <unit>`` on the host. Requires root. Fails (non-zero exit)
+    on units without ``ExecReload=``; use ``ssh_systemctl_restart`` for those. See SKILL
+    for details."""
+    return await _run_unit_action(ctx, host, verb="reload", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_enable(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl enable <unit>`` on the host. Requires root. Does NOT start the unit
+    -- call ``ssh_systemctl_start`` separately. See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="enable", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_disable(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl disable <unit>`` on the host. Requires root. Does NOT stop the unit
+    -- call ``ssh_systemctl_stop`` separately. See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="disable", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_mask(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl mask <unit>`` on the host. Requires root. Links the unit to
+    ``/dev/null``; nothing can start it until unmasked. See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="mask", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_unmask(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl unmask <unit>`` on the host. Requires root. Reverses
+    ``ssh_systemctl_mask``. See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="unmask", unit=unit, timeout=timeout)
+
+
+@mcp_server.tool(tags={"dangerous", "group:systemctl"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_systemctl_reset_failed(
+    host: str,
+    unit: str,
+    ctx: Context,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``systemctl reset-failed <unit>`` on the host. Requires root. Clears the failed
+    state for exactly one unit (no all-failed mode in v1). See SKILL for details."""
+    return await _run_unit_action(ctx, host, verb="reset-failed", unit=unit, timeout=timeout)

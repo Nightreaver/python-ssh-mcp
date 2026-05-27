@@ -26,7 +26,10 @@ poll for progress over the MCP task protocol.
 
 ## Returns
 
-Same `ExecResult` shape as `ssh_exec_run`.
+Same `ExecResult` shape as `ssh_exec_run`, including
+[`output_warnings`](../ssh-exec-run/SKILL.md#returns) (INC-057).
+Streamed output is sanitizer-checked at the chunk boundary, so
+warnings reflect the full captured stream, not just the final chunk.
 
 ## When to call it
 

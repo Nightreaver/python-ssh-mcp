@@ -13,6 +13,8 @@ restarts, health-status transitions, image pulls, network connects, volume
 mounts. The single most useful tool when a Docker host misbehaves between
 your last look and now.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | default | notes |

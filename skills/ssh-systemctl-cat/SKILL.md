@@ -24,9 +24,16 @@ Useful for verifying the unit configuration matches what was deployed.
   "host": "web01",
   "unit": "nginx.service",
   "stdout": "# /lib/systemd/system/nginx.service\n[Unit]\nDescription=...\n",
-  "exit_code": 0
+  "exit_code": 0,
+  "output_warnings": []
 }
 ```
+
+`output_warnings` (INC-058) is non-empty when the sanitizer flagged
+suspicious patterns in the unit file content (ANSI escapes, NUL bytes,
+bidi / zero-width characters, fake LLM-turn markers). Unit files
+authored by a templating system or pulled from a third-party deploy
+script can carry surprises; trust `stdout` only when this list is empty.
 
 ## When to call it
 
@@ -44,6 +51,14 @@ Useful for verifying the unit configuration matches what was deployed.
 ```python
 ssh_systemctl_cat(host="web01", unit="nginx.service")
 ```
+
+## Validation
+
+`unit` is rejected before the call leaves the server if it contains
+shell metacharacters, slashes, or characters outside `[A-Za-z0-9@._-]`.
+When a dot is present, the suffix must be a known unit type
+(`service | socket | target | timer | path | mount | automount |
+swap | slice | scope | device`); bare names like `nginx` are accepted.
 
 ## Common failures
 

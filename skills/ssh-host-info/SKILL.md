@@ -6,9 +6,15 @@ description: Fetch uname, /etc/os-release, and uptime from a remote host
 
 **Tier:** read-only | **Group:** `host` | **Tags:** `{safe, read, group:host}`
 
-Baseline host fingerprint. Runs three fixed-argv commands in parallel
-(`uname -a`, `cat /etc/os-release`, `uptime`) and returns parsed structured
-output. No shell interpolation -- safe against any string-valued input.
+Baseline host fingerprint. Runs six fixed-argv probes in parallel
+(`uname -a`, `cat /etc/os-release`, `uptime`, `nproc`, `cat /proc/cpuinfo`,
+`hostname -f`) and returns parsed structured output. No shell
+interpolation -- safe against any string-valued input. Each probe runs
+independently (`return_exceptions=True`); a missing `nproc` or
+restricted `/proc/cpuinfo` leaves that field `None` without losing its
+siblings.
+
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
 
 ## Inputs
 
@@ -26,6 +32,9 @@ output. No shell interpolation -- safe against any string-valued input.
 | `uname` | `str \| None` | full `uname -a` output |
 | `os_release` | `dict[str, str]` | every `KEY=value` from `/etc/os-release` (quotes stripped) |
 | `uptime` | `str \| None` | raw `uptime` output |
+| `cpu_model` | `str \| None` | first `model name` / `Model` / `Hardware` line from `/proc/cpuinfo` |
+| `cpu_count` | `int \| None` | parsed `nproc` output |
+| `hostname_fqdn` | `str \| None` | `hostname -f` output; `None` if the host doesn't have an FQDN |
 | `output_warnings` | `list[str]` | suspicious pattern warnings (see below) |
 
 ```json
@@ -34,12 +43,20 @@ output. No shell interpolation -- safe against any string-valued input.
   "uname": "Linux web01 6.1.0-21-amd64 #1 SMP Debian 6.1.90-1 x86_64 GNU/Linux",
   "os_release": {"NAME": "Debian GNU/Linux", "VERSION_ID": "12", "ID": "debian"},
   "uptime": "12:34:56 up 42 days,  3:14, 2 users, load average: 0.12, 0.09, 0.05",
+  "cpu_model": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+  "cpu_count": 8,
+  "hostname_fqdn": "web01.example.com",
   "output_warnings": []
 }
 ```
 
 `os_release` is a flat dict of every `KEY=value` line from `/etc/os-release`
 (quotes stripped). Missing values are simply absent.
+
+Any of `cpu_model`, `cpu_count`, `hostname_fqdn` may be `None` when the
+corresponding probe failed (busybox without `nproc`, container with
+restricted `/proc`, host without an FQDN configured). The other fields
+still populate.
 
 ### `output_warnings`
 
@@ -69,14 +86,18 @@ caution before rendering or further processing.
 
 ```python
 ssh_host_info(host="db01")
-# -> {"uname": "Linux db01 ...", "os_release": {"ID": "rocky", ...}, "uptime": "..."}
+# -> {"uname": "Linux db01 ...", "os_release": {"ID": "rocky", ...},
+#     "uptime": "...", "cpu_count": 8, "cpu_model": "...", "hostname_fqdn": "db01.example.com"}
 ```
 
 ## Common failures
 
 - `HostNotAllowed` / `HostBlocked` -- see host policy.
-- Non-zero exit from any of the three commands is tolerated; the field for
-  that command becomes `null` and the others still populate.
+- `PlatformNotSupported` -- Windows target. None of the probes have a
+  PowerShell equivalent here; use `ssh_exec_run "systeminfo"` once
+  allowlisted.
+- Non-zero exit from any individual probe is tolerated; the field for
+  that probe becomes `null` and the others still populate.
 
 ## Related
 

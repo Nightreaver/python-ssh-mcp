@@ -86,8 +86,12 @@ ssh_host_alerts(host="web01")
 
 ## Common failures
 
-- Non-Linux target -- `/proc/loadavg` and `/proc/meminfo` don't exist; those
-  metrics are silently skipped. Disk usage still works.
+- **Windows target** -- raises `PlatformNotSupported`. The tool calls
+  `require_posix(...)` upfront; the procfs reads never happen.
+- **POSIX-but-not-Linux target** (BSD, macOS) -- `/proc/loadavg` and
+  `/proc/meminfo` don't exist; those reads come back empty and the
+  load / memory metrics are silently skipped. Disk usage still works
+  via `df -PTh`.
 - Threshold misconfigured (e.g. `disk_use_percent_max = 150`) -- never
   breaches; not an error.
 

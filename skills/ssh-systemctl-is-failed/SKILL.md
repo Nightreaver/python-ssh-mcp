@@ -19,6 +19,8 @@ with systemctl's own signalling convention).
 
 ## Returns
 
+Unit is healthy (not in failed state):
+
 ```json
 {
   "host": "web01",
@@ -29,7 +31,23 @@ with systemctl's own signalling convention).
 }
 ```
 
-`failed=true` when `exit_code=0` (unit IS failed). `failed=false` otherwise.
+Unit IS in a failed state (the case you usually branch on):
+
+```json
+{
+  "host": "web01",
+  "unit": "nginx.service",
+  "failed": true,
+  "state": "failed",
+  "exit_code": 0
+}
+```
+
+The exit-code semantics is inverted relative to the usual convention:
+`exit_code=0` means "yes, the unit is failed" (matches what
+`systemctl is-failed` itself signals at the shell). The `failed`
+boolean flips that into the more intuitive direction -- branch on
+`failed`, not on `exit_code`.
 
 ## When to call it
 
@@ -47,6 +65,14 @@ with systemctl's own signalling convention).
 ```python
 ssh_systemctl_is_failed(host="web01", unit="nginx.service")
 ```
+
+## Validation
+
+`unit` is rejected before the call leaves the server if it contains
+shell metacharacters, slashes, or characters outside `[A-Za-z0-9@._-]`.
+When a dot is present, the suffix must be a known unit type
+(`service | socket | target | timer | path | mount | automount |
+swap | slice | scope | device`); bare names like `nginx` are accepted.
 
 ## Common failures
 

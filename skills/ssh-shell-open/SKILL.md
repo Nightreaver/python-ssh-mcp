@@ -4,7 +4,7 @@ description: Open a persistent shell session (cwd persists across ssh_shell_exec
 
 # `ssh_shell_open`
 
-**Tier:** dangerous | **Group:** `shell` | **Tags:** `{dangerous, group:shell}`
+**Tier:** dangerous | **Group:** `shell` | **Tags:** `{dangerous, group:shell, persistent-session}`
 
 Create a logical shell session on a host. Returns a `session_id` used by
 subsequent `ssh_shell_exec` / `ssh_shell_close` calls. The session tracks
@@ -16,13 +16,18 @@ prefixes the command with `cd <session.cwd>`, and reads back the new `$PWD`
 from a sentinel. That keeps the server stateless at the SSH layer while the
 shell state lives in memory on the MCP side.
 
+**POSIX-only.** The sentinel mechanism depends on POSIX shell semantics
+(`sh`, `$PWD`, `cd ~`). Windows targets raise `PlatformNotSupported`;
+there's no PowerShell branch and persistent shells on Windows hosts are
+out of scope for this MVP.
+
 ## Gates (all must pass)
 
 | Level | Knob | Default | Effect |
 |---|---|---|---|
 | tier | `ALLOW_DANGEROUS_TOOLS` env | `false` | closed = tool hidden from catalog |
 | group | `SSH_ENABLED_GROUPS` env | all groups enabled | must include `shell` |
-| feature | `ALLOW_PERSISTENT_SESSIONS` env | `true` | false = `ssh_shell_open` + `ssh_shell_exec` hidden; list/close still usable to drain pre-existing sessions |
+| feature | `ALLOW_PERSISTENT_SESSIONS` env | `true` | false = every tool tagged `persistent-session` is hidden via a Visibility transform. Hits `ssh_shell_open` + `ssh_shell_exec`; `ssh_shell_list` / `ssh_shell_close` keep their other tags and stay usable to drain pre-existing sessions |
 | per-host | `persistent_session` in hosts.toml | `true` | false = `ssh_shell_open` refuses that specific host; `ssh_exec_run` on the same host still works |
 
 Typical production shape: tier on, group on, global feature off, per-host
@@ -69,8 +74,12 @@ ALLOW_PERSISTENT_SESSIONS=false
 - Single-command invocations -- `ssh_exec_run` is cheaper and simpler.
 - Workflows that need env vars / shell history -- this MVP only tracks cwd.
   Export vars as part of each `ssh_shell_exec` command.
-- Parallel commands in the same session -- state is serialized by caller
-  discipline; concurrent calls will race on cwd updates.
+- Workflows that need **parallel** commands in the same session.
+  Concurrent `ssh_shell_exec` calls on the same `session_id` are serialized
+  by a per-session async lock (INC-023; INC-047 enforces it via a runtime
+  assert on `set_cwd`). They don't race -- they queue. If you need real
+  parallelism, open multiple sessions or use `ssh_exec_run` per
+  independent command.
 
 ## Example
 

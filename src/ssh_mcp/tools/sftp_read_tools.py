@@ -7,7 +7,7 @@ import re
 import shlex
 import stat as stat_module
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import asyncssh
 from fastmcp import Context
@@ -27,6 +27,10 @@ from ..services.path_policy import resolve_path
 from ..services.text import as_str
 from ..ssh.errors import SSHMCPError
 from ._context import pool_from, resolve_host, settings_from
+
+if TYPE_CHECKING:
+    from ..models.policy import ResolvedHost
+    from ..ssh.pool import ConnectionPool
 
 # POSIX binary per algorithm. All coreutils-standard; output shape is
 # identical (`<lowercase-hex>  <path>`), so one parser covers them all.
@@ -70,9 +74,9 @@ async def ssh_sftp_list(
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
 
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp(resolved) as sftp:
         names = sorted(await sftp.listdir(canonical))
         if "." in names:
             names.remove(".")
@@ -104,8 +108,8 @@ async def ssh_sftp_stat(host: str, path: str, ctx: Context) -> StatResult:
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
-    async with conn.start_sftp_client() as sftp:
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
+    async with pool.sftp(resolved) as sftp:
         attrs = await sftp.lstat(canonical)
         symlink_target: str | None = None
         if stat_module.S_ISLNK(attrs.permissions or 0):
@@ -132,10 +136,10 @@ async def ssh_sftp_download(host: str, path: str, ctx: Context) -> DownloadResul
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES  # reuse the upload cap for downloads
 
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp(resolved) as sftp:
         attrs = await sftp.stat(canonical)
         size = attrs.size or 0
         if size > cap:
@@ -199,12 +203,13 @@ async def ssh_find(
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical_root = await resolve_path(conn, path, policy, settings, must_exist=True)
+    canonical_root = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
 
     cap = settings.SSH_FIND_MAX_RESULTS
     if policy.platform == "windows":
         matches, truncated = await _sftp_walk_find(
-            conn,
+            pool,
+            resolved,
             canonical_root,
             depth,
             kind,
@@ -295,13 +300,13 @@ async def ssh_file_hash(
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
 
     effective_timeout = float(timeout if timeout is not None else settings.SSH_COMMAND_TIMEOUT)
     if policy.platform == "windows":
-        digest, size = await _hash_windows(conn, canonical, algorithm, effective_timeout)
+        digest, size = await _hash_windows(pool, resolved, conn, canonical, algorithm, effective_timeout)
     else:
-        digest, size = await _hash_posix(conn, canonical, algorithm, effective_timeout)
+        digest, size = await _hash_posix(pool, resolved, conn, canonical, algorithm, effective_timeout)
 
     if not _VALID_HASH_DIGEST_RE.fullmatch(digest):
         raise HashError(f"remote hash command returned unparseable digest {digest!r} for {canonical!r}")
@@ -316,6 +321,8 @@ async def ssh_file_hash(
 
 
 async def _hash_posix(
+    pool: ConnectionPool,
+    resolved: ResolvedHost,
     conn: asyncssh.SSHClientConnection,
     canonical: str,
     algorithm: str,
@@ -341,11 +348,13 @@ async def _hash_posix(
 
     # Separate SFTP stat to get the size. Cheap; keeps the result shape
     # consistent with `ssh_sftp_stat`.
-    size = await _stat_size(conn, canonical)
+    size = await _stat_size(pool, resolved, canonical)
     return digest, size
 
 
 async def _hash_windows(
+    pool: ConnectionPool,
+    resolved: ResolvedHost,
     conn: asyncssh.SSHClientConnection,
     canonical: str,
     algorithm: str,
@@ -406,11 +415,11 @@ async def _hash_windows(
             f"powershell Get-FileHash exited {result.exit_status} for {canonical!r}: "
             f"{stderr.strip() or '(no stderr)'}"
         )
-    size = await _stat_size(conn, canonical)
+    size = await _stat_size(pool, resolved, canonical)
     return digest, size
 
 
-async def _stat_size(conn: asyncssh.SSHClientConnection, canonical: str) -> int:
+async def _stat_size(pool: ConnectionPool, resolved: ResolvedHost, canonical: str) -> int:
     """Best-effort file size via SFTP stat. Returns -1 if unavailable.
 
     Catches ``asyncssh.Error`` (base class) rather than only ``SFTPError``
@@ -418,7 +427,7 @@ async def _stat_size(conn: asyncssh.SSHClientConnection, canonical: str) -> int:
     to the -1 sentinel instead of escaping through the hash call.
     """
     try:
-        async with conn.start_sftp_client() as sftp:
+        async with pool.sftp(resolved) as sftp:
             attrs = await sftp.stat(canonical)
         return int(attrs.size or 0)
     except asyncssh.Error:
@@ -429,7 +438,8 @@ async def _stat_size(conn: asyncssh.SSHClientConnection, canonical: str) -> int:
 
 
 async def _sftp_walk_find(
-    conn: asyncssh.SSHClientConnection,
+    pool: ConnectionPool,
+    resolved: ResolvedHost,
     root: str,
     max_depth: int,
     kind: str,
@@ -455,7 +465,7 @@ async def _sftp_walk_find(
     # BFS queue: (path, depth). Normalize to forward slashes for output so the
     # LLM sees consistent separators regardless of how the server reports them.
     queue: list[tuple[str, int]] = [(root, 0)]
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp(resolved) as sftp:
         while queue and len(matches) <= cap:
             cur, depth = queue.pop(0)
             try:

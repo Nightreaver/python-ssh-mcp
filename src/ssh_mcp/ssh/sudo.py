@@ -6,10 +6,14 @@ this module falls back to per-call. Persistent su-shells are deferred because
 they require brittle prompt-matching and cross-invocation state.
 
 Password sourcing priority (fetch_sudo_password):
-  1. `SSH_SUDO_PASSWORD_CMD` -- operator-configured shell command whose stdout is
-     the password. Invoked per call; never cached on disk.
-  2. OS keychain via `keyring`, service name `ssh-mcp-sudo`, user `default`.
-  3. Passwordless sudoers entry (returns None; we pass `sudo -n`).
+  1. OS keychain via `keyring`, service `ssh-mcp-sudo`, user `<alias>` --
+     per-host password. Set once with `keyring.set_password("ssh-mcp-sudo",
+     "alfred", "...")` so the operator never types it in a file.
+  2. `SSH_SUDO_PASSWORD_CMD` -- operator-configured shell command whose stdout is
+     the password. Global. Invoked per call; never cached on disk.
+  3. OS keychain via `keyring`, service `ssh-mcp-sudo`, user `default` --
+     global fallback for fleets that share a single sudo password.
+  4. Passwordless sudoers entry (returns None; we pass `sudo -n`).
 
 `SSH_SUDO_PASSWORD` env-var passwords are **rejected** at startup (INC-009):
 environment is visible via `/proc/self/environ` and leaks into child processes
@@ -25,12 +29,19 @@ import logging
 import os
 import shlex
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .errors import AuthenticationFailed
 from .exec import run as exec_run
 
+try:  # Optional dep: operators without a keychain rely on the secret-cmd hook.
+    import keyring as _keyring
+except ImportError:
+    _keyring = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import asyncssh
 
     from ..config import Settings
@@ -46,29 +57,68 @@ logger = logging.getLogger(__name__)
 _SECRET_CMD_TIMEOUT_SECONDS = 10
 
 
-def fetch_sudo_password(settings: Settings) -> str | None:
-    """Resolve the sudo password via the documented priority chain."""
-    if settings.SSH_SUDO_PASSWORD_CMD:
-        try:
-            return _run_secret_cmd(settings.SSH_SUDO_PASSWORD_CMD)
-        except AuthenticationFailed as exc:
-            logger.warning("SSH_SUDO_PASSWORD_CMD failed: %s", exc)
+def fetch_sudo_password(settings: Settings, alias: str) -> str | None:
+    """Resolve the sudo password via the documented priority chain.
 
-    try:
-        import keyring  # type: ignore[import-not-found]
+    ``alias`` is the host identifier the caller addressed (typically the
+    ``hosts.toml`` alias the LLM passed as ``host=``). Used as the keyring
+    user key for the per-host lookup -- the operator stores the password
+    once with ``keyring.set_password("ssh-mcp-sudo", alias, "...")`` and
+    every subsequent call resolves it transparently. Falls back to the
+    legacy ``"default"`` keyring entry plus the global cmd hook when the
+    per-host entry is absent.
 
-        pw = keyring.get_password("ssh-mcp-sudo", "default")
+    The priority chain is expressed as a list of source callables -- each
+    returns the password on hit, ``None`` on miss. The list order IS the
+    documented priority order; do not re-shuffle without updating the
+    module docstring.
+    """
+    sources: list[Callable[[], str | None]] = [
+        lambda: _keyring_lookup(alias, label="per-host"),
+        lambda: _secret_cmd_lookup(settings),
+        lambda: _keyring_lookup("default", label="default fallback"),
+    ]
+    for source in sources:
+        pw = source()
         if pw:
             return pw
-    except ImportError:
-        logger.debug("keyring not installed; skipping OS keychain lookup")
-    except Exception as exc:
-        logger.debug("keyring lookup failed: %s", exc)
-
     # INC-009: SSH_SUDO_PASSWORD env var removed -- rejected at startup.
-    # Use SSH_SUDO_PASSWORD_CMD or the OS keychain. Passwordless sudoers is
-    # the recommended deployment (see README Sudo section).
+    # Use a per-host keyring entry, SSH_SUDO_PASSWORD_CMD, or the legacy
+    # "default" keyring entry. Passwordless sudoers is the recommended
+    # deployment (see README Sudo section).
     return None
+
+
+def _keyring_lookup(user: str, *, label: str) -> str | None:
+    """Look up ``ssh-mcp-sudo / <user>`` in the OS keychain.
+
+    ``label`` is the priority-chain stage name used in DEBUG logs so an
+    operator tracing why a lookup failed sees which step misbehaved
+    (per-host vs default fallback). Missing keyring dep is a no-op.
+
+    Reads ``_keyring`` from the module namespace on every call so test
+    monkeypatching (``monkeypatch.setattr(sudo, "_keyring", stub)``) takes
+    effect even though the import happens at module load.
+    """
+    kr: Any = _keyring
+    if kr is None:
+        return None
+    try:
+        return kr.get_password("ssh-mcp-sudo", user)  # type: ignore[no-any-return]
+    except Exception as exc:
+        logger.debug("keyring %s lookup failed for %s: %s", label, user, exc)
+        return None
+
+
+def _secret_cmd_lookup(settings: Settings) -> str | None:
+    """Run ``SSH_SUDO_PASSWORD_CMD`` if configured; ``None`` otherwise."""
+    if not settings.SSH_SUDO_PASSWORD_CMD:
+        return None
+    try:
+        return _run_secret_cmd(settings.SSH_SUDO_PASSWORD_CMD)
+    except AuthenticationFailed as exc:
+        logger.warning("SSH_SUDO_PASSWORD_CMD failed: %s", exc)
+        return None
 
 
 def _run_secret_cmd(cmd: str) -> str:

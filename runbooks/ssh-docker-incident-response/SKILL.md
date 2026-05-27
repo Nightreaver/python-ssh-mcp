@@ -8,6 +8,18 @@ When a container is dead, looping, OOMing, or the host is out of disk, follow
 this sequence. Uses only `safe`/`read` tier tools by default; low-access +
 dangerous steps are explicitly marked and guarded.
 
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
+
+Every docker action below uses an `ssh_docker_*` wrapper; the only
+`ssh_exec_run` mention in this runbook is a prose reference to
+`ss -tlnp` for port-conflict diagnosis, which has no native wrapper
+and is not cheatsheet-matched.
+
 ## 1. Get the full container inventory
 
 ```python

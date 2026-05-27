@@ -103,6 +103,12 @@ def _ctx(
 
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=conn)
+    # INC-pool-sftp: tools now go through pool.sftp_policy(...) / pool.sftp(...)
+    # which are async context managers yielding the SFTPClient. Wire them to
+    # the same _FakeSftp the test set up so the existing assertions on
+    # symlink_calls / link_calls / lstat_calls still work.
+    pool.sftp_policy = MagicMock(return_value=sftp)
+    pool.sftp = MagicMock(return_value=sftp)
 
     hosts = {"web01": _policy()}
 
@@ -350,6 +356,8 @@ async def test_symbolic_target_outside_allowlist_raises() -> None:
     conn.start_sftp_client = MagicMock(return_value=sftp)
     conn.run = fake_run
     pool.acquire = AsyncMock(return_value=conn)
+    pool.sftp_policy = MagicMock(return_value=sftp)
+    pool.sftp = MagicMock(return_value=sftp)
 
     hosts = {
         "web01": HostPolicy(
@@ -421,6 +429,8 @@ async def test_symbolic_relative_target_resolved_against_dst_parent(
 
     conn.run = fake_run
     pool.acquire = AsyncMock(return_value=conn)
+    pool.sftp_policy = MagicMock(return_value=sftp)
+    pool.sftp = MagicMock(return_value=sftp)
 
     hosts = {
         "web01": HostPolicy(

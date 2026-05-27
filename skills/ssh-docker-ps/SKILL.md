@@ -14,6 +14,9 @@ Filter kwargs (`name`, `status`, `label`, `ancestor`) map directly to Docker's
 `--filter KEY=VALUE` flags. Filters are validated before any SSH connection is
 opened -- bad values raise `ValueError` immediately, before any I/O.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported` (all docker tools
+share this constraint via `_run_docker`'s `require_posix` gate).
+
 ## Inputs
 
 | name | type | required | default | notes |
@@ -28,14 +31,14 @@ opened -- bad values raise `ValueError` immediately, before any I/O.
 
 ## Filter details
 
-**`name`** — Docker performs a substring match (not exact). `name="web"` matches
+**`name`** -- Docker performs a substring match (not exact). `name="web"` matches
 `web`, `web-1`, `nginx-web`, etc.
 
-**`status`** — Accepts exactly the six values Docker recognises for `ps`:
+**`status`** -- Accepts exactly the six values Docker recognises for `ps`:
 `created`, `running`, `paused`, `restarting`, `exited`, `dead`. Note that
 `removing` is a compose-only status; it is not in this set.
 
-**`label`** — Two forms accepted:
+**`label`** -- Two forms accepted:
 - Bare key: `"role"` -- matches any container that has the label, regardless of value.
 - Key=value: `"role=frontend"` -- exact value match.
 
@@ -46,7 +49,7 @@ Kubernetes-style label keys work: `app.kubernetes.io/name=nginx`,
 Value regex: `[A-Za-z0-9._:/=+-]{1,256}`. Shell metacharacters (`;`, `|`, `` ` ``,
 `$`, `&`, `>`, newlines, quotes, spaces) are rejected in both key and value.
 
-**`ancestor`** — Matches containers created from the named image or any of its
+**`ancestor`** -- Matches containers created from the named image or any of its
 descendants. Accepts an image name with or without a tag (`nginx`, `nginx:1.25`).
 Same `_validate_name` regex as container names.
 

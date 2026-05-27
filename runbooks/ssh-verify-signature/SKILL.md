@@ -11,6 +11,17 @@ trust models) to hide behind a one-size-fits-all wrapper. Instead, you
 compose `ssh_exec_run` with the right command-allowlist entry and the
 right pubkey distribution. This runbook describes the shape.
 
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
+
+`gpg`, `cosign`, and `minisign` invocations in this runbook are NOT
+cheatsheet-matched -- they have no native MCP wrapper (deliberately,
+see above) and pass through `ssh_exec_run` cleanly without opt-out.
+
 ## Responsibility boundary
 
 If you care about supply-chain integrity, the **right place to verify is

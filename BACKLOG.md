@@ -4,6 +4,10 @@ Tracks implementation work against [DESIGN.md](DESIGN.md). Mark items `[x]` as t
 
 ## Progress
 
+### 2026-05-22
+
+- **Exec-discipline sprint kickoff.** Eval of a real OS-upgrade session found ~62% of 127 `ssh_exec_run` calls were avoidable (matched an existing native tool's cheatsheet entry), with 3 anti-patterns dominating: heredoc file-writes that should go through `ssh_upload`, lookups that should use native sftp/systemctl/docker tools, and ad-hoc shell composites where the script itself wasn't the artefact. Full breakdown in [docs/evals/2026-05-22-exec-run-discipline.md](docs/evals/2026-05-22-exec-run-discipline.md). Kicks off the discipline sprint: A1 (this row + correction #8 in `.claude/team/corrections.md` + eval relocation), C1/C2 (first-class systemctl/apt mutation tools so `ssh_sudo_exec systemctl ...` and `ssh_sudo_exec apt-get ...` stop being the default path), B1 (default-on `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=false` reject patterns so heredoc + native-tool-matching commands fail closed at the tool surface), B2 (hint footer pointing the LLM at the matching native tool when a reject fires), D1/D2 (runbook addition + AGENTS.md sweep so the discipline is documented and audit-checkable). (id: exec-discipline-sprint)
+
 ### 2026-05-08
 
 - **Native `--filter` kwargs on read-tier docker list tools (v1.8.0)** — `ssh_docker_ps` gains `name`, `status`, `label`, `ancestor`; `ssh_docker_images` gains `reference` (glob-style, supports `*`/`?`/digests), `dangling`, `label`; `ssh_docker_compose_ps` gains `service` (trailing positional) and `status` (7-value compose set including `removing`). Label key regex widened to `[A-Za-z0-9._/-]{1,128}` so k8s-style keys (`app.kubernetes.io/name`) are accepted. All filters validated before I/O via `_validate_name`, `_validate_label_filter`, `_validate_reference_filter`. Argv ordering deterministic and locked by tests in `tests/test_docker_read_filters.py`. (id: docker-filter-kwargs-sprint)

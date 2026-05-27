@@ -54,7 +54,7 @@ async def _prepare_existing(
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical = await resolve_path(conn, path, policy, settings, must_exist=True)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
     return pool, policy, settings, conn, canonical
 
 
@@ -66,7 +66,7 @@ async def _prepare_creatable(
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
-    canonical = await resolve_path(conn, path, policy, settings, must_exist=False)
+    canonical = await resolve_path(conn, path, policy, settings, must_exist=False, pool=pool)
     return pool, policy, settings, conn, canonical
 
 
@@ -111,14 +111,14 @@ async def ssh_mkdir(
     mode: int = 0o755,
 ) -> WriteResult:
     """Create a directory. With `parents=True`, behave like `mkdir -p`."""
-    _pool, _policy, _settings, conn, canonical = await _prepare_creatable(ctx, host, path)
-    async with conn.start_sftp_client() as sftp:
+    pool, policy, _settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
+    async with pool.sftp_policy(policy) as sftp:
         if parents:
             await _mkdir_p(sftp, canonical, mode)
         else:
             await sftp.mkdir(canonical, asyncssh.SFTPAttrs(permissions=mode))
     return WriteResult(
-        host=_policy.hostname,
+        host=policy.hostname,
         path=canonical,
         success=True,
         message="created" if not parents else "created (with parents)",
@@ -159,13 +159,13 @@ def _is_missing(exc: asyncssh.SFTPError) -> bool:
 @audited(tier="low-access")
 async def ssh_delete(host: str, path: str, ctx: Context) -> WriteResult:
     """Delete a single file. Rejects directories — use ssh_delete_folder."""
-    _pool, _policy, _settings, conn, canonical = await _prepare_existing(ctx, host, path)
-    async with conn.start_sftp_client() as sftp:
+    pool, policy, _settings, _conn, canonical = await _prepare_existing(ctx, host, path)
+    async with pool.sftp_policy(policy) as sftp:
         attrs = await sftp.lstat(canonical)
         if stat_module.S_ISDIR(attrs.permissions or 0):
             raise WriteError(f"{canonical!r} is a directory; use ssh_delete_folder")
         await sftp.remove(canonical)
-    return WriteResult(host=_policy.hostname, path=canonical, success=True, message="deleted")
+    return WriteResult(host=policy.hostname, path=canonical, success=True, message="deleted")
 
 
 # --------- ssh_delete_folder ---------
@@ -186,9 +186,9 @@ async def ssh_delete_folder(
     and falls back to `rm -rf -- <canonical>` (fixed argv, re-validated).
     `dry_run=True` returns what would be deleted without touching anything.
     """
-    _pool, policy, settings, conn, canonical = await _prepare_existing(ctx, host, path)
+    pool, policy, settings, conn, canonical = await _prepare_existing(ctx, host, path)
     cap = settings.SSH_DELETE_FOLDER_MAX_ENTRIES
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         if not recursive:
             if dry_run:
                 return {
@@ -218,7 +218,7 @@ async def ssh_delete_folder(
     # or doing the SFTP recursive walk on Windows.
     allowlist = effective_allowlist(policy, settings)
     re_canonical = await canonicalize_and_check(
-        conn, canonical, allowlist, must_exist=True, platform=policy.platform
+        conn, canonical, allowlist, must_exist=True, platform=policy.platform, pool=pool, policy=policy
     )
     if re_canonical != canonical:
         raise WriteError(f"path changed between walk and rm -rf: was {canonical!r}, now {re_canonical!r}")
@@ -231,7 +231,7 @@ async def ssh_delete_folder(
         # roundtrip each -- so this is slow for large trees. That's the tradeoff
         # for not requiring a remote shell; operators with huge Windows trees
         # can fall back to ssh_exec_run under ALLOW_DANGEROUS_TOOLS.
-        async with conn.start_sftp_client() as sftp:
+        async with pool.sftp_policy(policy) as sftp:
             for entry in reversed(entries):
                 try:
                     attrs = await sftp.lstat(entry)
@@ -303,7 +303,26 @@ async def ssh_cp(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
     resolved = resolve_host(ctx, host)
     require_posix(resolved, tool="ssh_cp", reason="uses `cp -a`; no cross-platform equivalent wired yet")
     pool, policy, settings, conn, src_canonical = await _prepare_existing(ctx, host, src)
-    dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False)
+    dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False, pool=pool)
+
+    # Capture src size BEFORE the copy so ``bytes_written`` surfaces a
+    # meaningful number on the result. The pre-copy stat is cheap (one
+    # SFTP round-trip) and accurate for the file case; for directory
+    # copies (``cp -a dir/ /elsewhere/``) we leave the field at 0 since
+    # aggregating tree size is too expensive for a best-effort metric.
+    src_size = 0
+    try:
+        async with pool.sftp_policy(policy) as sftp:
+            attrs = await sftp.lstat(src_canonical)
+        if stat_module.S_ISREG(attrs.permissions or 0):
+            src_size = int(attrs.size or 0)
+    except asyncssh.SFTPError:
+        # The src was just canonicalized with must_exist=True, so the
+        # stat failing here would be surprising. Swallow rather than
+        # racing the copy on a transient SFTP hiccup -- bytes_written=0
+        # is the same fallback we'd get without this block.
+        pass
+
     result = await conn.run(shlex.join(["cp", "-a", "--", src_canonical, dst_canonical]), check=False)
     if result.exit_status != 0:
         stderr = result.stderr
@@ -314,6 +333,7 @@ async def ssh_cp(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
         host=policy.hostname,
         path=dst_canonical,
         success=True,
+        bytes_written=src_size,
         message=f"copied from {src_canonical}",
     )
 
@@ -331,8 +351,27 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
     need a separate implementation we haven't written.
     """
     pool, policy, settings, conn, src_canonical = await _prepare_existing(ctx, host, src)
-    dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False)
-    async with conn.start_sftp_client() as sftp:
+    dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False, pool=pool)
+
+    # Pre-capture src size for ``bytes_written``. Same-fs rename writes
+    # nothing on disk, but operators reading the result still want a
+    # number describing what landed at ``dst``; cross-fs fallback actually
+    # copies, where the field is genuinely "bytes transferred". The size
+    # comes from one SFTP lstat before the rename -- skip for non-regular
+    # files (directory moves) since aggregating a tree is too expensive
+    # for a best-effort metric. Matches ``ssh_cp``'s contract.
+    src_size = 0
+    async with pool.sftp_policy(policy) as sftp:
+        try:
+            attrs = await sftp.lstat(src_canonical)
+            if stat_module.S_ISREG(attrs.permissions or 0):
+                src_size = int(attrs.size or 0)
+        except asyncssh.SFTPError:
+            # Stat hiccup is non-fatal -- the rename below will surface
+            # any real problem. ``bytes_written=0`` is the same fallback
+            # we'd report without the probe.
+            pass
+
         try:
             await sftp.posix_rename(src_canonical, dst_canonical)
             mode = "sftp-rename"
@@ -353,6 +392,7 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
         host=policy.hostname,
         path=dst_canonical,
         success=True,
+        bytes_written=src_size,
         message=f"moved from {src_canonical} ({mode})",
     )
 
@@ -430,6 +470,8 @@ async def ssh_link(
         allowlist,
         must_exist=False,
         platform=policy.platform,
+        pool=pool,
+        policy=policy,
     )
     check_not_restricted(dst_canonical, restricted, policy.platform)
 
@@ -439,7 +481,8 @@ async def ssh_link(
     # docstrings for the policy contract specific to each mode.
     if symbolic:
         await _create_symbolic_link(
-            conn=conn,
+            pool=pool,
+            policy=policy,
             src=src,
             dst_canonical=dst_canonical,
             allowlist=allowlist,
@@ -456,6 +499,8 @@ async def ssh_link(
     if follow_symlinks:
         src_canonical = await _create_hard_link_followed(
             conn=conn,
+            pool=pool,
+            policy=policy,
             src=src,
             dst_canonical=dst_canonical,
             allowlist=allowlist,
@@ -471,6 +516,8 @@ async def ssh_link(
 
     src_full = await _create_hard_link_unfollowed(
         conn=conn,
+        pool=pool,
+        policy=policy,
         src=src,
         dst_canonical=dst_canonical,
         allowlist=allowlist,
@@ -487,7 +534,8 @@ async def ssh_link(
 
 async def _create_symbolic_link(
     *,
-    conn: asyncssh.SSHClientConnection,
+    pool: ConnectionPool,
+    policy: HostPolicy,
     src: str,
     dst_canonical: str,
     allowlist: list[str],
@@ -510,7 +558,7 @@ async def _create_symbolic_link(
     check_in_allowlist(target_for_check, allowlist, platform)
     check_not_restricted(target_for_check, restricted, platform)
 
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         # Pass src VERBATIM -- preserves relative-link semantics on disk.
         await sftp.symlink(src, dst_canonical)
 
@@ -518,6 +566,8 @@ async def _create_symbolic_link(
 async def _create_hard_link_followed(
     *,
     conn: asyncssh.SSHClientConnection,
+    pool: ConnectionPool,
+    policy: HostPolicy,
     src: str,
     dst_canonical: str,
     allowlist: list[str],
@@ -537,9 +587,11 @@ async def _create_hard_link_followed(
         allowlist,
         must_exist=True,
         platform=platform,
+        pool=pool,
+        policy=policy,
     )
     check_not_restricted(src_canonical, restricted, platform)
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         await sftp.link(src_canonical, dst_canonical)
     return src_canonical
 
@@ -547,6 +599,8 @@ async def _create_hard_link_followed(
 async def _create_hard_link_unfollowed(
     *,
     conn: asyncssh.SSHClientConnection,
+    pool: ConnectionPool,
+    policy: HostPolicy,
     src: str,
     dst_canonical: str,
     allowlist: list[str],
@@ -571,10 +625,12 @@ async def _create_hard_link_unfollowed(
         allowlist,
         must_exist=True,
         platform=platform,
+        pool=pool,
+        policy=policy,
     )
     check_not_restricted(src_parent_canonical, restricted, platform)
     src_full = posixpath.join(src_parent_canonical, src_filename)
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         try:
             await sftp.lstat(src_full)
         except asyncssh.SFTPError as exc:
@@ -638,12 +694,12 @@ async def ssh_upload(
     (tarballs, images, compiled artifacts) where invalid UTF-8 must round
     trip cleanly.
     """
-    _pool, policy, settings, conn, canonical = await _prepare_creatable(ctx, host, path)
+    pool, policy, settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
     data = _resolve_upload_payload(content_text, content_base64)
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
     if len(data) > cap:
         raise WriteError(f"payload {len(data)} bytes exceeds SSH_UPLOAD_MAX_FILE_BYTES={cap}")
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         await _atomic_write(sftp, canonical, data, mode)
     return WriteResult(
         host=policy.hostname,
@@ -693,9 +749,9 @@ async def ssh_edit(
     occurrence: Literal["single", "all"] = "single",
 ) -> WriteResult:
     """Structured edit: replace `old_string` with `new_string` atomically."""
-    _pool, policy, settings, conn, canonical = await _prepare_existing(ctx, host, path)
+    pool, policy, settings, _conn, canonical = await _prepare_existing(ctx, host, path)
     cap = settings.SSH_EDIT_MAX_FILE_BYTES
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         attrs = await sftp.stat(canonical)
         size = attrs.size or 0
         if size > cap:
@@ -741,9 +797,9 @@ async def ssh_patch(
     ctx: Context,
 ) -> WriteResult:
     """Apply a unified diff to a single file atomically."""
-    _pool, policy, settings, conn, canonical = await _prepare_existing(ctx, host, path)
+    pool, policy, settings, _conn, canonical = await _prepare_existing(ctx, host, path)
     cap = settings.SSH_EDIT_MAX_FILE_BYTES
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         attrs = await sftp.stat(canonical)
         size = attrs.size or 0
         if size > cap:
@@ -806,14 +862,14 @@ async def ssh_deploy(
     ``ssh_sudo_exec`` in the dangerous tier). ``mode`` sets the file's
     permission bits and is applied to the tmp file before the final rename.
     """
-    _pool, policy, settings, conn, canonical = await _prepare_creatable(ctx, host, path)
+    pool, policy, settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
     data = _resolve_upload_payload(content_text, content_base64)
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
     if len(data) > cap:
         raise WriteError(f"payload {len(data)} bytes exceeds SSH_UPLOAD_MAX_FILE_BYTES={cap}")
 
     backup_path: str | None = None
-    async with conn.start_sftp_client() as sftp:
+    async with pool.sftp_policy(policy) as sftp:
         # If the target exists AND caller asked for a backup, rename-out-of-way.
         if backup:
             try:

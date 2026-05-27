@@ -9,6 +9,20 @@ compose-managed). Pulls the new image first, stops + removes the old
 container, starts the new one with the same config, then verifies
 healthy. If verification fails, rolls back to the previous image.
 
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
+
+Sections 4 and 6 below intentionally use `ssh_exec_run` for
+`docker run` with persistent-service flags (`-p`, `-v`, `-e`,
+`--restart`, `--network`). These match the `docker` cheatsheet
+pattern; the operator must enable the opt-out for this runbook
+because `ssh_docker_run` is intentionally limited to ephemeral
+one-shot containers and cannot express those flags.
+
 For compose-managed stacks, use
 [ssh-deploy-verify](../ssh-deploy-verify/SKILL.md) + `ssh_docker_compose_up`
 instead -- compose handles the stop/start/dependency ordering, re-deriving
@@ -72,36 +86,61 @@ pattern than tag pinning; tags are mutable.
 Requires `ALLOW_LOW_ACCESS_TOOLS` (stop) + `ALLOW_DANGEROUS_TOOLS` (rm):
 
 ```python
-ssh_docker_stop(host="web01", container="my-service", timeout=30)
+ssh_docker_stop(host="web01", container="my-service")
 ssh_docker_rm(host="web01", container="my-service")
 ```
 
-`timeout=30` gives the process 30s to handle SIGTERM before Docker
-escalates to SIGKILL. Tune upward for services that need time to drain
-(databases, queue workers). Too-short timeout + `rm` = data loss for
-stateful workloads; if the container is stateful, confirm volumes hold
-the state (Section 1's `Mounts`) before removing it.
+The default SIGTERM grace period is whatever the daemon / image defines
+(usually 10s). `ssh_docker_stop` does not expose `--time` -- if the
+service needs a longer drain window (databases, queue workers), call
+`docker stop -t <seconds>` via `ssh_exec_run` instead. Too-short
+shutdown + `rm` = data loss for stateful workloads; if the container is
+stateful, confirm volumes hold the state (Section 1's `Mounts`) before
+removing it.
 
 ## 4. Start the new container
 
+`ssh_docker_run` is intentionally a thin wrapper for ephemeral one-shot
+containers -- its argv is hardcoded to `docker run --rm -d --name <n>
+-- <image> [container-cmd...]` and the `args` list is passed **after**
+the image (so it becomes the container's command, not docker options).
+That means flags like `--restart`, `-p`, `-v`, `-e`, `--network`
+cannot be set through it. For a persistent service rollout, drive
+`docker run` through `ssh_exec_run` instead. This call matches the
+`docker` cheatsheet pattern and requires
+`SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` on the server because the
+persistent-service flag surface is intentionally outside
+`ssh_docker_run`:
+
 ```python
-ssh_docker_run(
-    host="web01",
-    image="ghcr.io/myorg/my-service:v2.3.0",
-    name="my-service",
-    detach=True,
-    restart_policy="unless-stopped",
-    ports={"8080/tcp": 8080},
-    volumes={"/opt/my-service/data": "/data"},
-    env={"DATABASE_URL": "...", ...},
-    networks=["frontend"],
-)
+import shlex
+
+flags = [
+    "--name", "my-service",
+    "-d",
+    "--restart", "unless-stopped",
+    "-p", "8080:8080",
+    "-v", "/opt/my-service/data:/data",
+    "-e", "DATABASE_URL=postgres://...",
+    "--network", "frontend",
+]
+cmd = "docker run " + " ".join(shlex.quote(f) for f in flags) \
+      + " -- ghcr.io/myorg/my-service:v2.3.0"
+
+ssh_exec_run(host="web01", command=cmd, timeout=60)
 ```
 
-Every argument here comes from Section 1. A common bug: forgetting to
+Every flag here comes from Section 1. A common bug: forgetting to
 reattach a user-defined network, so the new container comes up on
 bridge and can't reach its peers. Verify `NetworkSettings.Networks` in
 Section 5's inspect.
+
+Note: this step needs `ALLOW_DANGEROUS_TOOLS` (for `ssh_exec_run`) and
+`docker` in the host's `command_allowlist`. The capability-escalation
+checks that `ssh_docker_run` enforces by default (rejecting
+`--privileged`, `--cap-add`, host bind mounts, etc.) do **not** apply
+when you go through `ssh_exec_run` -- it's your responsibility to keep
+escalation flags out of the command string.
 
 ## 5. Verify health
 
@@ -145,14 +184,16 @@ the container, not the image). Recreate the old container on the
 previous tag / digest from Section 1:
 
 ```python
-ssh_docker_stop(host="web01", container="my-service", timeout=30)
+import shlex
+
+ssh_docker_stop(host="web01", container="my-service")
 ssh_docker_rm(host="web01", container="my-service")
-ssh_docker_run(
-    host="web01",
-    image="ghcr.io/myorg/my-service:v2.2.9",  # previous tag from Section 1
-    name="my-service",
-    # ...same args as Section 4...
-)
+
+# Same flag list as Section 4, only the image tag changes. Same
+# cheatsheet opt-out applies: requires SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true.
+cmd = "docker run " + " ".join(shlex.quote(f) for f in flags) \
+      + " -- ghcr.io/myorg/my-service:v2.2.9"  # previous tag from Section 1
+ssh_exec_run(host="web01", command=cmd, timeout=60)
 ```
 
 Then re-run Section 5 against the rolled-back container. A bad rollback
@@ -182,12 +223,16 @@ cleanup after you're confident the new one is stable.
 
 - Section 1 + 2 + 5 are read-only.
 - Section 3 needs `ALLOW_LOW_ACCESS_TOOLS` (stop) and
-  `ALLOW_DANGEROUS_TOOLS` (`docker_rm`, `docker_run`).
+  `ALLOW_DANGEROUS_TOOLS` (`docker_rm`).
+- Section 4 needs `ALLOW_DANGEROUS_TOOLS` (`ssh_exec_run`) and `docker`
+  in the host's `command_allowlist`.
 - Section 6 has the same tier requirements as 3+4.
 - This runbook does **not** manage secrets. If Section 1 surfaces env
-  vars that are secrets, re-pass them via `env=` in Section 4 without
-  logging them. If the LLM can't re-supply a secret it was shown in
-  inspect output, escalate -- don't guess.
+  vars that are secrets, re-pass them via the `-e KEY=VALUE` flags in
+  Section 4 without logging them. The audit log of `ssh_exec_run`
+  records the full command string -- if a secret would land there in
+  plaintext, escalate to an operator who can configure secrets via
+  `--env-file <path>` or a docker secret out-of-band instead.
 - Image pull source is assumed already configured (registry auth in
   `docker login` state on the host). Re-authing mid-rollout is its own
   runbook.

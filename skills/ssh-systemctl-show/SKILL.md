@@ -61,9 +61,27 @@ ssh_systemctl_show(host="web01", unit="nginx.service")
 - When a human-readable summary is sufficient -- use `ssh_systemctl_status`.
 - When you want to see the unit file source -- use `ssh_systemctl_cat`.
 
+## Validation
+
+- `unit` is rejected before the call leaves the server if it contains
+  shell metacharacters, slashes, or characters outside `[A-Za-z0-9@._-]`.
+  When a dot is present, the suffix must be a known unit type
+  (`service | socket | target | timer | path | mount | automount |
+  swap | slice | scope | device`).
+- `properties[]` entries must match `^[A-Z][A-Za-z0-9]*$` (PascalCase,
+  no underscores, no hyphens) -- e.g. `ActiveState`, `ExecMainStatus`,
+  `NRestarts`. Lowercase / underscored / hyphenated names raise
+  `ValueError`; that's distinct from systemd silently ignoring an
+  unknown-but-well-formed property name (see Common failures).
+
 ## Common failures
 
-- Unknown property names produce an empty dict entry (systemd silently ignores unknown `--property=` keys).
+- Property names that pass validation (`^[A-Z][A-Za-z0-9]*$`) but
+  systemd does not recognise are silently absent from the returned
+  `properties` dict -- systemd ignores unknown `--property=` keys and
+  emits nothing for them. Names that fail validation (lowercase,
+  underscores, hyphens, etc.) raise `ValueError` *before* the call --
+  see the Validation section.
 - Duplicate keys (e.g. multiple `ExecStartPre=`) are resolved by last-write-wins in the parser.
 - `exit_code` non-zero with an empty `properties` dict: unit does not exist on the host.
 

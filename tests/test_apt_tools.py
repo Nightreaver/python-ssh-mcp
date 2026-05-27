@@ -41,6 +41,7 @@ from ssh_mcp.models.apt import (
     AptSearchResult,
     AptShowResult,
 )
+from ssh_mcp.models.apt import validate_package_name as _validate_package_name
 from ssh_mcp.services.apt_parser import (
     parse_apt_list,
     parse_apt_policy,
@@ -50,7 +51,6 @@ from ssh_mcp.services.apt_parser import (
 from ssh_mcp.ssh.errors import PlatformNotSupported
 from ssh_mcp.tools import apt_tools
 from ssh_mcp.tools.apt_tools import (
-    _validate_package_name,
     _validate_pattern,
     ssh_apt_list,
     ssh_apt_search,

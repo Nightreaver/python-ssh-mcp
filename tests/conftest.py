@@ -1,4 +1,5 @@
 """Shared test fixtures + config overrides for pytest."""
+
 from __future__ import annotations
 
 import os
@@ -10,6 +11,12 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+# Make ``tests/_helpers.py`` importable as ``from _helpers import ...`` from
+# any test module without forcing ``tests/`` to be a package.
+TESTS = Path(__file__).resolve().parent
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
 
 # Keep tests from accidentally reaching out to real hosts or inheriting the
 # operator's .env. `.env` values (SSH_DEFAULT_KEY etc.) otherwise flip auth

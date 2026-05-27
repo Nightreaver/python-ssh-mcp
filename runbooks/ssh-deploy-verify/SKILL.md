@@ -9,12 +9,19 @@ service actually came up healthy". Closes the gap between `ssh_upload`
 landing bytes and a user seeing a working service. Uses `read` +
 `low-access` + `dangerous` tiers; explicit markers on each step.
 
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
+
 ## Sequence
 
 1. Precheck host capacity (read)
-2. Compute local hash, then upload with backup (dangerous: file write)
+2. Compute local hash, then upload with backup (low-access: file write)
 3. Verify remote hash matches local (read)
-4. Bring compose stack up or restart service (dangerous)
+4. Bring compose stack up or restart service (low-access or dangerous)
 5. Tail logs + inspect state (read)
 6. Roll back on failure (low-access + dangerous)
 
@@ -91,16 +98,17 @@ ssh_docker_compose_up(
 )
 ```
 
-For a systemd-style service (requires exec tier + allowlisted
-`systemctl`):
+For a systemd-style service (requires `ALLOW_DANGEROUS_TOOLS=true`;
+caller must run as root or via a sudoers-enabled SSH account):
 
 ```python
-ssh_exec_run(host="web01", command="systemctl reload nginx", timeout=15)
+ssh_systemctl_reload(host="web01", unit="nginx.service")
 ```
 
 Prefer **reload** over **restart** when the service supports it -- reload
 re-reads config without dropping in-flight connections. Restart breaks
-long-lived clients.
+long-lived clients. For restart, use `ssh_systemctl_restart` with the
+same shape.
 
 ## 5. Tail logs + confirm healthy
 
@@ -137,10 +145,11 @@ first `compose_ps` after `compose_up` may still show dependents in
 `backup_path`). Swap it back into place and re-activate:
 
 ```python
+# ssh_mv uses SFTP posix_rename, which atomically replaces the
+# destination if it exists -- no explicit "overwrite" flag.
 ssh_mv(host="web01",
-       source="/opt/app/config.json.bak-20260415T031500Z",
-       destination="/opt/app/config.json",
-       overwrite=True)
+       src="/opt/app/config.json.bak-20260415T031500Z",
+       dst="/opt/app/config.json")
 ssh_docker_compose_restart(host="web01",
                            compose_file="/opt/app/docker-compose.yml")
 ```
@@ -151,10 +160,14 @@ state -- a bad backup is worse than no backup.
 ## Boundaries
 
 - Section 1 + 3 + 5 are read-only.
-- Section 2 requires `ALLOW_DANGEROUS_TOOLS=true` (`ssh_deploy` is
-  dangerous tier because it writes files).
-- Section 4 + 6 require `ALLOW_LOW_ACCESS_TOOLS` (restart) or
-  `ALLOW_DANGEROUS_TOOLS` (`compose_up`, `ssh_mv`, `ssh_exec_run`).
+- Section 2 requires `ALLOW_LOW_ACCESS_TOOLS=true` (`ssh_deploy` is
+  low-access tier; it writes files but only inside paths the host's
+  `path_allowlist` already permits).
+- Section 4 requires `ALLOW_LOW_ACCESS_TOOLS` (`compose_restart`) or
+  `ALLOW_DANGEROUS_TOOLS` (`compose_up`, `ssh_systemctl_reload` /
+  `ssh_systemctl_restart`).
+- Section 6 requires `ALLOW_LOW_ACCESS_TOOLS` (`ssh_mv`,
+  `compose_restart`).
 - Multi-host rollouts are out of scope. Deploy to one host, verify, then
   loop. Parallel deploys across a fleet without between-host
   health-gating is an outage pattern.

@@ -4,36 +4,36 @@ Tools are grouped by **tier** (which `ALLOW_*` flag they require) and within eac
 
 For a full per-tool runbook, follow the **skill** link on each entry — the SKILL.md files cover `When to call`, `When NOT to call`, examples, common failures, and related tools.
 
-- 77 tools total
+- 70 tools total
 - 10 tool groups: `host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`
 - 4 tiers: read (always on) · low-access · dangerous · sudo
 - See [README.md](README.md) for tier flags, host config, restricted paths, BM25 search, and `SSH_ENABLED_GROUPS` examples.
 
 ## Context cost per group
 
-How many bytes each group adds to the `tools/list` response every MCP turn — so operators can decide what to trim via `SSH_ENABLED_GROUPS`. Measured by serializing each tool's wire schema (`name`, `description`, `inputSchema`, `outputSchema`, `_meta`) as it is sent to the client. Tokens are a bytes/4 heuristic — directional, not exact (JSON tokenises slightly denser on Claude / GPT-4-family).
+How many bytes each group adds to the `tools/list` response every MCP turn — so operators can decide what to trim via `SSH_ENABLED_GROUPS`. Measured by serializing each tool's wire schema (`name`, `description`, `inputSchema`, `annotations`) as it is sent to the client. Tokens are a bytes/4 heuristic — directional, not exact (JSON tokenises slightly denser on Claude / GPT-4-family).
 
 | Group | Tools | Bytes | ~Tokens | Avg / tool |
 |---|---:|---:|---:|---:|
-| `host` | 13 | 20,292 | ~5,073 | 1,561 B |
-| `docker` | 26 | 20,038 | ~5,009 | 771 B |
-| `file-ops` | 11 | 14,357 | ~3,589 | 1,305 B |
-| `exec` | 4 | 11,358 | ~2,839 | **2,840 B** (densest — rich input schemas) |
-| `sftp-read` | 5 | 5,685 | ~1,421 | 1,137 B |
-| `systemctl` | 8 | 5,621 | ~1,405 | 703 B |
-| `sudo` | 2 | 3,015 | ~753 | 1,508 B |
-| `shell` | 4 | 1,958 | ~489 | 490 B |
-| `pkg` | 3 | 1,884 | ~471 | 628 B |
-| `session` | 1 | 292 | ~73 | 292 B |
-| **Total** | **77** | **84,500** | **~21,125** | — |
+| `docker` | 26 | 15,337 | ~3,834 | 589 B |
+| `systemctl` | 8 | 4,501 | ~1,125 | 562 B |
+| `file-ops` | 9 | 4,062 | ~1,015 | 451 B |
+| `exec` | 3 | 3,189 | ~797 | **1,063 B** (densest — rich input schemas) |
+| `sftp-read` | 5 | 3,187 | ~796 | 637 B |
+| `host` | 6 | 2,275 | ~568 | 379 B |
+| `shell` | 4 | 1,377 | ~344 | 344 B |
+| `sudo` | 2 | 1,339 | ~334 | 669 B |
+| `session` | 2 | 324 | ~81 | 162 B |
+| `pkg` | 3 | ~1,800 | ~450 | 600 B |
+| **Total** | **68** | **~37,391** | **~9,347** | — |
 
-**Savings from common `SSH_ENABLED_GROUPS` trims** (vs. the ~21,125-tok full catalogue):
+**Savings from common `SSH_ENABLED_GROUPS` trims:**
 
-- Drop `docker` only → ~16,116 tok left (saves **24%** — biggest single win)
-- Drop `systemctl` only → ~19,720 tok left (saves **7%**)
-- Drop both → ~14,711 tok left (saves **30%**)
-- Keep only `host,sftp-read,docker` (observability + container triage) → ~11,503 tok (saves **46%**)
-- Keep only `host,session,systemctl` (systemd-triage persona) → ~6,551 tok (saves **69%**)
+- Drop `docker` only → ~5,063 tok (saves **43%** — biggest single win)
+- Drop `systemctl` only → ~7,772 tok (saves **12%**)
+- Drop both → ~3,938 tok (saves **55%**)
+- Keep only `host,sftp-read,docker` (observability + container triage) → ~5,200 tok (saves ~42%)
+- Keep only `host,session,systemctl` (systemd-triage persona) → ~1,774 tok (saves ~80%)
 
 ## Contents
 
@@ -208,11 +208,12 @@ All 8 tools carry `tags={"safe", "read", "group:systemctl"}` and `version="1.0"`
 
 ## Package management (read) (`group:pkg`)
 
-All three tools probe for `apt` via `command -v apt` before invoking any APT binary. Hosts without `apt` (non-Debian distros, Windows targets) receive a clean `PlatformNotSupported` error. Pattern and package-name arguments are argv-validated — no shell metacharacters accepted. All three carry `tags={"safe", "read", "group:pkg"}`. POSIX-only.
+Read-tier apt tools probe for `apt` via `command -v apt` before invoking any APT binary. Hosts without `apt` (non-Debian distros, Windows targets) receive a clean `PlatformNotSupported` error. Pattern and package-name arguments are argv-validated — no shell metacharacters accepted. All read-tier tools carry `tags={"safe", "read", "group:pkg"}`. POSIX-only.
 
 - **`ssh_apt_list`** — List APT packages filtered by mode and optional glob. `mode` ∈ `{"installed", "upgradable", "all"}`. Maps to `apt list --installed` / `--upgradable` / no flag. Narrow wide queries with `pattern` (e.g. `nginx*`) to avoid stdout-cap truncation. Returns `AptListResult` with `packages[]`, `total`, `truncated`, `output_warnings`. Inputs: `host`, `mode`, `pattern` (optional). [skill](skills/ssh-apt-list/SKILL.md)
 - **`ssh_apt_search`** — Search package names AND descriptions via `apt-cache search`. Returns name + short description per match. Use when you know what a tool does but not what the package is called. Returns `AptSearchResult` with `results[]`, `output_warnings`. Inputs: `host`, `pattern`. [skill](skills/ssh-apt-search/SKILL.md)
 - **`ssh_apt_show`** — Combined `apt-cache show` + `apt-cache policy` for one package in a single call. Returns `installed_version`, `candidate_version`, `repos[]`, `description`, `depends[]`, `recommends[]`, `suggests[]`, `conflicts[]`, `breaks[]`, `replaces[]`, `output_warnings`. Use for pre-upgrade audits and dependency-conflict diagnosis. Inputs: `host`, `package`. [skill](skills/ssh-apt-show/SKILL.md)
+- **`ssh_apt_show_holds`** — Parse `apt-mark showhold` into a structured `held[]` list. Read-only sibling of the mutation tool `ssh_apt_mark`; no root needed. Returns `AptHoldsResult`. Inputs: `host`, `timeout` (optional). [skill](skills/ssh-apt-show-holds/SKILL.md)
 
 ## Persistent shell (read) (`group:shell`)
 
@@ -304,6 +305,16 @@ Container exec, image pulls, container/image creation + removal, prune.
 - **`ssh_docker_compose_up`** — Bring up a compose project. Defaults to `-d` (detached). `build=True` rebuilds images first. Inputs: `host`, `compose_file`, `detached`, `build`, `timeout`. [skill](skills/ssh-docker-compose-up/SKILL.md)
 - **`ssh_docker_compose_down`** — Tear down a compose project. `volumes=True` also removes named volumes (**destructive — data loss**). Inputs: `host`, `compose_file`, `volumes` (False), `timeout`. [skill](skills/ssh-docker-compose-down/SKILL.md)
 - **`ssh_docker_compose_pull`** — Pull images for a compose project without starting services. Inputs: `host`, `compose_file`, `timeout`. [skill](skills/ssh-docker-compose-pull/SKILL.md)
+
+## Package management (mutating) (`group:pkg`)
+
+Dangerous-tier counterparts to the read-tier `ssh_apt_*` tools. All require root (use a sudoers-enabled SSH account or run via `ssh_sudo_exec`). Package names are validated against the Debian shape `^[a-z0-9][a-z0-9.+-]{0,127}$` before reaching argv; argv is built list-style and joined via `shlex.join`. All carry `tags={"dangerous", "group:pkg"}`. POSIX-only.
+
+- **`ssh_apt_install`** — `apt-get -y install -- <packages...>`. Optionally runs `apt-get update` first via `update_first=True`. Returns `AptMutationResult` with `exit_code`, `stdout`, `stderr`, `duration_ms`, `output_warnings`. Inputs: `host`, `packages[]`, `update_first` (False), `timeout` (optional). [skill](skills/ssh-apt-install/SKILL.md)
+- **`ssh_apt_upgrade`** — `apt-get -y upgrade`. Operator should typically run `ssh_apt_install([], update_first=True)` or refresh the index via `ssh_exec_run 'apt-get update'` first. Does NOT cover `do-release-upgrade` (intentional — release-upgrades stay an explicit `ssh_exec_run` decision). Inputs: `host`, `timeout` (optional). [skill](skills/ssh-apt-upgrade/SKILL.md)
+- **`ssh_apt_remove`** — `apt-get -y remove -- <packages...>`. With `purge=True` uses the `purge` verb (also removes config files). Inputs: `host`, `packages[]`, `purge` (False), `timeout` (optional). [skill](skills/ssh-apt-remove/SKILL.md)
+- **`ssh_apt_autoremove`** — `apt-get -y autoremove`. Removes packages installed as dependencies that are no longer needed. Inputs: `host`, `timeout` (optional). [skill](skills/ssh-apt-autoremove/SKILL.md)
+- **`ssh_apt_mark`** — `apt-mark hold|unhold -- <packages...>`. Pins (or releases) packages at their current version. `action` ∈ `{"hold", "unhold"}`; the read-only `showhold` variant lives in the read-tier sibling `ssh_apt_show_holds`. Inputs: `host`, `action`, `packages[]`, `timeout` (optional). [skill](skills/ssh-apt-mark/SKILL.md)
 
 ## Persistent shell (open + exec) (`group:shell`)
 

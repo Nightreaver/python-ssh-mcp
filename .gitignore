@@ -14,7 +14,10 @@ build/
 .coverage
 htmlcov/
 analyze/
+# Local agent-config files -- never committed.
 .claude
+CLAUDE.md
+AGENTS.md
 .mcp.json
 hosts.toml
 hosts-e2e.toml
@@ -32,4 +35,8 @@ tests/integration/known_hosts
 notes/
 
 BOOTSTRAP.md
-AGENTS.md
+
+# Host snapshot bundles pulled off-box per runbooks/ssh-host-snapshot.
+# Contain plaintext secrets (/etc/shadow, ssh host keys, app keys) -- must
+# never be committed. See runbooks/ssh-host-snapshot/SKILL.md.
+snapshots/

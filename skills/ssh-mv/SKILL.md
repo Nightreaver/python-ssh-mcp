@@ -10,6 +10,13 @@ Tries SFTP `posix_rename` first -- atomic within a filesystem. On
 `EXDEV`-class errors (cross-filesystem), falls back to `mv -- src dst`
 with **fixed argv**. Both paths canonicalized + allowlist-checked.
 
+**Windows note:** the `mv --` fallback only runs when the host's
+`platform = "posix"`. On Windows targets, same-filesystem moves work
+via SFTP `posix_rename` as usual, but cross-filesystem moves
+(`EXDEV`-class errors) re-raise the SFTP error instead of falling
+back. Use `ssh_sftp_download` + `ssh_upload` + `ssh_delete` if you
+need a cross-volume move on Windows.
+
 ## Inputs
 
 | name | type | required | notes |

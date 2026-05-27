@@ -67,9 +67,17 @@ ssh_sftp_list(host="web01", path="/var/log", offset=20, limit=20)
 
 ## Common failures
 
-- `PathNotAllowed` -- `path` is outside the per-host `path_allowlist` + `SSH_PATH_ALLOWLIST`. (Note: only enforced for low-access tools -- `ssh_sftp_list` itself does not enforce path policy by default.)
 - SFTP "no such file" -> asyncssh raises; surfaces as a tool error.
+- SFTP "permission denied" -> the SSH user can't traverse / read the
+  directory.
 - `limit` outside `[1, 1000]` -> `ValueError`.
+
+## Path policy
+
+`ssh_sftp_list` does NOT enforce `path_allowlist` -- read-tier
+enumeration operates anywhere the SSH user can already `lstat`. The
+allowlist gates mutating tools (low-access + dangerous tiers); reads
+follow the underlying SSH user's filesystem permissions.
 
 ## Related
 

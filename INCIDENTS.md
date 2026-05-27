@@ -45,6 +45,8 @@ Newest at the top.
 
 | ID | Legacy | Date | Severity | Status | Source | Title |
 |---|---|---|---|---|---|---|
+| INC-063 | — | 2026-05-26 | Medium | resolved | external-report | POSIX `_canonicalize_posix` failed under chrooted SFTP (DSM 7.x): shell `realpath` (run over SSH channel, real-FS view) ENOENTs on paths the LLM gets from SFTP discovery (chroot view). Fix: fall back to `sftp.realpath` when shell realpath fails — SFTP-backed tools now work on chroot hosts; shell-backed tools (`ssh_cp`, `ssh_delete_folder` rm fallback, `ssh_mv` cross-fs fallback) still fail with native shell errors and need the chroot disabled or `ssh_exec_run` |
+| INC-062 | — | 2026-05-22 | Low | resolved | internal-review | Exec-discipline cheatsheet: default-on rejection of `ssh_exec_run` / `_streaming` / `ssh_sudo_exec` commands matching a native MCP wrapper. `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=false` (default) refuses with `CommandIsCheatsheetMatch`; `=true` runs but tags the audit line with `cheatsheet_pattern_id` for opt-out telemetry. Rejection audit-line suppressed (no host-side side-effect); hooks still fire so PRE/POST stay paired. Eval at `docs/evals/2026-05-22-exec-run-discipline.md` |
 | INC-061 | — | 2026-04-30 | Medium | resolved | code-review | Compose tools bypassed `restricted_paths` — `compose_file` only went through `canonicalize_and_check`, skipping `check_not_restricted`; all 5 call sites migrated to `resolve_path` in v1.2.0 |
 | INC-060 | — | 2026-04-27 | Low | resolved | internal-review | `ssh_host_ping` also auto-injects `agent_notes` (the LLM's own sidecar) — both layers now ride on ping by default. Independent toggle `SSH_PING_INCLUDES_AGENT_NOTES=false` for context-budget-sensitive deployments |
 | INC-059 | — | 2026-04-25 | Low | resolved | internal-review | `ssh_host_ping` auto-injects `operator_notes` from `hosts.toml`'s `notes` field — operator hard-rules ride on the canonical "starting work" probe so the LLM gets them without an explicit `ssh_host_notes` call. Opt-out via `SSH_PING_INCLUDES_NOTES=false`; agent-side memory still requires the dedicated tool |
@@ -109,6 +111,59 @@ Newest at the top.
 ---
 
 ## Detailed entries
+
+### INC-063 — `_canonicalize_posix` failed under chrooted SFTP (view-mismatch with SSH session channel)
+
+- **Date:** 2026-05-26 · **Severity:** Medium · **Status:** resolved
+- **Source:** external-report (operator: DSM 7.3.2 host `james`)
+- **Refs:** [services/path_policy.py](src/ssh_mcp/services/path_policy.py), [tests/test_path_policy.py](tests/test_path_policy.py)
+
+**Gap:** On hosts where the sshd config runs the SFTP subsystem in a chroot but leaves the SSH session channel pointed at the real filesystem (DSM 7.x internal-sftp is the canonical case; OPNsense and some appliance SSH servers do the same), the LLM gets one set of paths from SFTP discovery (`ssh_sftp_list("/")` returns chroot-view `/docker/...`) and a different set from session-channel tools (`ssh_exec_run "ls /"` shows `/volume1/docker/...`). `_canonicalize_posix` runs shell `realpath` over the SSH channel, which sees the real filesystem view, so every chroot-view path the LLM produces ENOENTs at canonicalize time — `ssh_sftp_stat`, `ssh_upload`, `ssh_edit`, `ssh_mkdir`, `ssh_sftp_download`, `ssh_find` all fail with `cannot canonicalize ...`. The original bug report misattributed the failure to `asyncssh.SFTPClient.realpath` (SSH_FXP_REALPATH); the stack trace `realpath: /docker: No such file or directory` is in fact the shell-realpath stderr.
+
+**Impact:** Every SFTP-backed file tool was unusable on chrooted SFTP hosts even when the SFTP subsystem itself was healthy and `ssh_sftp_list` returned correct paths. Not a security defect (path policy was still enforced; it just rejected everything), but a hard usability break — the host appeared half-functional to the LLM.
+
+**Fix:** `_canonicalize_posix` now falls back to `sftp.realpath` (SSH_FXP_REALPATH) when the shell `realpath` exits non-zero. SFTP-protocol realpath runs inside the SFTP subsystem's view, so its answer matches what subsequent SFTP I/O sees. Two new helpers ([services/path_policy.py](src/ssh_mcp/services/path_policy.py)): `_try_sftp_realpath` and `_try_sftp_stat`, both `asyncssh.Error`-tolerant so a transport hiccup during the probe degrades to `None`/`False` and the caller raises the original shell-realpath error.
+
+**must_exist semantics under fallback:** `realpath -m` (must_exist=False) tolerates missing leaves on the shell side already; when we fall back via SFTP for that case, no stat verification runs. For `must_exist=True` (the strict path), the shell call uses `-e` and the fallback runs `sftp.stat` on the SFTP-resolved path to enforce existence — if the chroot view also doesn't have the file, we raise `PathNotAllowed` with a message that names both probes.
+
+**WARNING-level log line** on `ssh_mcp.services.path_policy` whenever the fallback fires — that's the operator's signal that this host has a view mismatch. Message names the workarounds: disable SFTP chroot server-side (clean), or treat shell-backed tools (`ssh_cp` / `ssh_delete_folder`'s rm fallback / `ssh_mv` cross-fs fallback) as expected to fail.
+
+**Security model intact:** the canonical path returned IS still canonicalized — by the SFTP server, in the SFTP server's view. `path_allowlist` enforcement against that path is meaningful because the operator typically configures the allowlist against the view they see when they sftp into the host (`/docker` not `/volume1/docker`). If the operator's allowlist is in the real-FS form, the fallback path will fail the allowlist check — fail-loud signal to update the allowlist.
+
+**Shell-backed tools** (`ssh_cp` uses `cp -a`, `ssh_delete_folder`'s rm-rf fallback, `ssh_mv` cross-fs fallback, `ssh_link -P` mode) still operate via the SSH channel and will fail with their native shell errors on chroot-view paths. Documented in the path_policy module docstring. Operators have two options: fix the chroot (preferred), or use `ssh_exec_run` for those operations.
+
+**Tests:** 5 new cases in [tests/test_path_policy.py](tests/test_path_policy.py): fallback fires on shell ENOENT and returns the SFTP view, fallback skipped on shell happy-path (no extra round-trip cost for non-chroot hosts), both-failed raises with both-named message, `must_exist=True` + SFTP-stat-missing rejects, `must_exist=False` skips the verifying stat. A `FakeConn`-level default SFTP stub (raising) preserves the pre-fix contract for existing "shell fails" tests.
+
+### INC-062 — Exec-discipline cheatsheet: default-on rejection of native-tool-matching shell commands
+
+- **Date:** 2026-05-22 · **Severity:** Low · **Status:** resolved
+- **Source:** internal-review (eval of one real OS-upgrade session)
+- **Refs:** [docs/evals/2026-05-22-exec-run-discipline.md](docs/evals/2026-05-22-exec-run-discipline.md), [services/exec_cheatsheet.py](src/ssh_mcp/services/exec_cheatsheet.py), [services/audit.py](src/ssh_mcp/services/audit.py), [ssh/errors.py](src/ssh_mcp/ssh/errors.py), [config.py](src/ssh_mcp/config.py), [.claude/team/corrections.md](.claude/team/corrections.md) (rule #6), [tests/test_exec_cheatsheet.py](tests/test_exec_cheatsheet.py), [tests/test_exec_cheatsheet_footer.py](tests/test_exec_cheatsheet_footer.py)
+
+**Gap:** An eval of one real OS-upgrade session found ~62% of 127 `ssh_exec_run` calls were avoidable — they matched a dedicated native MCP wrapper's cheatsheet entry (heredoc file-writes that belong in `ssh_upload`, `docker ... ` / `systemctl ... ` / `journalctl ... ` / `apt(-get) install|...` that have first-class tools, single `mkdir`/`cp`/`mv`/`rm` invocations, output redirection to a real file). The cheatsheet was already documented in the tool docstring; documentation alone wasn't enough to change behavior.
+
+**Impact:** Avoidable calls are not a security defect on their own, but the discipline gap has cascading costs: (1) `ssh_exec_run` bypasses the wrapper's structured result models so the LLM has to re-parse stdout, (2) wrapper-specific policy gates (e.g. path policy on `ssh_upload`, allowlist narrowing on docker tools) are skipped, (3) the audit line carries a raw-command hash instead of a structured signal (no `docker_subcommand`, no `unit_hash`). Heredoc file-writes are the worst offender — they shell-substitute the payload and bypass `path_allowlist` + atomic temp+rename.
+
+**Fix:** Sprint kickoff `2026-05-22`. Default-on rejection of cheatsheet-matching commands at the tool surface.
+
+- New [services/exec_cheatsheet.py](src/ssh_mcp/services/exec_cheatsheet.py): pattern matcher (7 classes — `docker`, `systemctl <verb>`, `journalctl`, `apt(-get) <mutation-verb>`, heredoc/tee/echo>/printf>, single `mkdir`/`cp`/`mv`/`rm` (composite-safe), generic `>` to a real file). Stable `pattern_id` per class so audits, hints, and tests share one vocabulary.
+- New `CommandIsCheatsheetMatch` exception in [ssh/errors.py](src/ssh_mcp/ssh/errors.py) carrying `pattern_id`, `command`, `suggested_tool`, `message`.
+- New setting `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS: bool = False` in [config.py](src/ssh_mcp/config.py) + [.env.example](.env.example). When `False` (default), `ssh_exec_run` / `ssh_exec_run_streaming` / `ssh_sudo_exec` refuse with `CommandIsCheatsheetMatch` BEFORE pool acquire / `check_command` / host resolution — no host-side side-effect.
+- `cheatsheet_precheck(...)` is shared across the three call sites (lives in `services.exec_cheatsheet`, not the tool layer — see SOC fix in this same sprint).
+- Audit-line **suppression** for rejected calls: the `@audited` wrapper's `finally` skips `record()` when the raised exception is `CommandIsCheatsheetMatch`, so refused calls don't create `result=error` noise in operator dashboards. The DEBUG full-error log on the same logger still fires for local forensics.
+- Opt-out (`SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true`) lets the command through AND adds `cheatsheet_pattern_id=<id>` to the audit line so operators can grep `jq 'select(.cheatsheet_pattern_id)'` to count abuse by pattern. Also prepends a `cheatsheet_hint_warning` to `output_warnings` ("consider <wrapper> next time") so the LLM sees the redirect target even when the call succeeded.
+- Hook behavior intentionally unchanged: PRE/POST `HookRegistry` hooks fire on rejection so operator hooks see matched pairs. Hook handlers that want to skip cheatsheet rejections inspect `HookContext.error == "CommandIsCheatsheetMatch"`.
+
+**Process artefacts (separate from the code fix):**
+
+- Correction row #6 in [.claude/team/corrections.md](.claude/team/corrections.md) makes the discipline non-negotiable for all sub-agents.
+- AGENTS.md §3.6 documents the discipline and links to the eval.
+- 11 runbook SKILL.mds updated so examples reach for native tools first.
+- New first-class apt mutation tools (`ssh_apt_install` / `_upgrade` / `_remove` / `_autoremove` / `_mark` + `ssh_apt_show_holds`) and systemctl mutation tools (committed earlier in `f42f426`) reduce the legitimate exec-tier surface area by covering what `ssh_sudo_exec systemctl ...` and `ssh_sudo_exec apt-get ...` previously served.
+
+**Tests:** [tests/test_exec_cheatsheet.py](tests/test_exec_cheatsheet.py) (positive + negative + ordering matrix + audit suppression — ~137 tests) and [tests/test_exec_cheatsheet_footer.py](tests/test_exec_cheatsheet_footer.py) (opt-out hint + audit pattern_id field + ContextVar isolation across sequential calls). Per-pattern positive matrix pins the canonical `pattern_id → suggested_tool` map; deterministic ordering tests pin "earlier pattern wins" under whitespace + trailing-arg permutations.
+
+**Risk: false positives.** The matcher is deliberately conservative (composite scripts, append-redirects, discard-to-/dev/null all fall through) but a benign `cmd > /tmp/foo` will now refuse unless the operator flips the opt-out. The `cheatsheet_pattern_id` audit field exists precisely so operators can see what is being refused or bypassed.
 
 ### INC-061 — Compose tools bypassed `restricted_paths`
 

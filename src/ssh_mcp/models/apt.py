@@ -6,16 +6,62 @@ instead of silently producing an incomplete result the LLM then trusts.
 
 Tools live in :mod:`ssh_mcp.tools.apt_tools`; parsers in
 :mod:`ssh_mcp.services.apt_parser`.
+
+Package-name validators (``validate_package_name`` / ``validate_packages``)
+also live here -- they are part of the model contract, not the tool layer,
+and the same regex is consulted from multiple call sites in the dangerous
+tier.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
 # Mirror models/results.py + models/systemctl.py (INC-046).
 _RESULT_MODEL_CONFIG = ConfigDict(extra="forbid")
+
+
+# ---------------------------------------------------------------------------
+# Validators (model invariants -- shared between read + mutation tools)
+# ---------------------------------------------------------------------------
+
+# Debian package-name shape (subset of policy-manual §5.6.7). Lowercase
+# only by convention -- apt is case-insensitive on lookup but accepting
+# lowercase keeps the regex tight and the audit trail unambiguous.
+_PACKAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.+\-]{0,127}$")
+
+
+def validate_package_name(name: str) -> str:
+    """Validate a Debian package name.
+
+    Returns the validated name unchanged. Rejects empty strings, names
+    containing uppercase, slashes, or shell metacharacters.
+    """
+    if not name:
+        raise ValueError("package name must not be empty")
+    if not _PACKAGE_NAME_RE.match(name):
+        raise ValueError(
+            f"package name {name!r} must match [a-z0-9][a-z0-9.+-]{{0,127}} "
+            "(Debian package name shape, lowercase only)"
+        )
+    return name
+
+
+def validate_packages(packages: list[str], *, action: str) -> list[str]:
+    """Validate every package name in ``packages``.
+
+    Returns the same list (post-validation). Empty lists are rejected here
+    for the actions that require at least one target -- the per-tool callers
+    rely on this to keep the empty-list policy in one place.
+    """
+    if not packages:
+        raise ValueError(f"packages must be non-empty for action={action!r}")
+    for pkg in packages:
+        validate_package_name(pkg)
+    return packages
 
 
 # ---------------------------------------------------------------------------
@@ -155,4 +201,75 @@ class AptShowResult(BaseModel):
     conflicts: list[str] = []
     breaks: list[str] = []
     replaces: list[str] = []
+    output_warnings: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# ssh_apt_install / ssh_apt_upgrade / ssh_apt_remove / ssh_apt_autoremove /
+# ssh_apt_mark  (dangerous-tier mutation tools)
+# ---------------------------------------------------------------------------
+
+
+#: The verb that ended up running on the remote box. ``purge`` is distinct
+#: from ``remove`` so the LLM (and audit consumers) can tell whether config
+#: files were also removed. ``hold`` / ``unhold`` come from ``apt-mark``;
+#: ``showhold`` has its own result model.
+AptMutationAction = Literal[
+    "install",
+    "upgrade",
+    "remove",
+    "purge",
+    "autoremove",
+    "hold",
+    "unhold",
+]
+
+
+class AptMutationResult(BaseModel):
+    """Shared shape for install / upgrade / remove / autoremove / mark mutations.
+
+    Non-zero exit codes are returned as data in ``exit_code`` (apt-get's exit
+    codes are informative -- 100 means the package list could not be parsed,
+    1 means "nothing to do or held back", etc.); only transport failures
+    escape the tool.
+    """
+
+    model_config = _RESULT_MODEL_CONFIG
+
+    host: str
+    action: AptMutationAction
+    # Input packages, post-validation. Empty list for verbs that take no
+    # package argument (``upgrade``, ``autoremove``).
+    packages: list[str] = []
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+    # Mirrors ``ExecResult.stdout_truncated`` -- True when stdout reached the
+    # ``SSH_STDOUT_CAP_BYTES`` cap and was trimmed before we returned it.
+    stdout_truncated: bool = False
+    # INC-058: output_sanitizer warnings about stdout/stderr. apt's free-form
+    # progress/dialog text is a moderate prompt-injection vector (DEBCONF,
+    # apt-listchanges, esm hooks have all shipped escape sequences before).
+    output_warnings: list[str] = []
+
+
+class AptHoldsResult(BaseModel):
+    """Result of ``apt-mark showhold`` -- parsed list of currently-held packages.
+
+    Distinct from ``AptMutationResult`` because the value the LLM cares about
+    is the parsed ``held`` list, not a free-form stdout chunk. We still carry
+    the raw stdout/stderr/exit_code so callers debugging apt's output can see
+    what came back.
+    """
+
+    model_config = _RESULT_MODEL_CONFIG
+
+    host: str
+    held: list[str]
+    stdout: str
+    stderr: str
+    exit_code: int
+    duration_ms: int
+    stdout_truncated: bool = False
     output_warnings: list[str] = []

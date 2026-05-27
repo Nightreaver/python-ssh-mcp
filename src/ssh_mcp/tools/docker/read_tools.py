@@ -27,7 +27,9 @@ from ._helpers import (
     _rewrite_stdout,
     _run_docker,
     _strip_noisy_fields,
+    _validate_label,
     _validate_name,
+    _validate_reference,
 )
 
 
@@ -38,6 +40,10 @@ async def ssh_docker_ps(
     ctx: Context,
     all_: bool = False,
     include_labels: bool = False,
+    name: str | None = None,
+    status: Literal["created", "running", "paused", "restarting", "exited", "dead"] | None = None,
+    label: str | None = None,
+    ancestor: str | None = None,
 ) -> dict[str, Any]:
     """List containers. Set ``all_=True`` to include stopped. Output is a list
     of JSON objects (one per container) parsed from ``docker ps --format '{{json .}}'``.
@@ -46,8 +52,35 @@ async def ssh_docker_ps(
     hundreds of bytes per container on OCI-tagged images (ghcr, org.opencontainers.*)
     and 20+ containers quickly blow past the MCP output cap. Set True if you
     actually need them (e.g. filtering by label).
+
+    Server-side filters map directly to Docker ``--filter KEY=VALUE`` flags.
+    All filter inputs are validated BEFORE any SSH connection opens:
+
+    - ``name``: substring match against container name. Validated against
+      ``[A-Za-z0-9][A-Za-z0-9_.-]*``.
+    - ``status``: one of the six states Docker's ``ps`` recognises.
+      ``removing`` is compose-only and intentionally not in this set.
+    - ``label``: bare key (``role``) or key=value (``role=frontend``).
+    - ``ancestor``: match containers whose image (or any ancestor) is the
+      given name/tag. Same regex as ``name``.
+
+    Multiple filters AND together (Docker semantics).
     """
+    if name is not None:
+        _validate_name("container", name)
+    if ancestor is not None:
+        _validate_name("ancestor", ancestor)
+    if label is not None:
+        _validate_label(label)
     argv = ["ps", "--format", "{{json .}}", "--no-trunc"]
+    if name is not None:
+        argv.extend(["--filter", f"name={name}"])
+    if status is not None:
+        argv.extend(["--filter", f"status={status}"])
+    if label is not None:
+        argv.extend(["--filter", f"label={label}"])
+    if ancestor is not None:
+        argv.extend(["--filter", f"ancestor={ancestor}"])
     if all_:
         argv.append("-a")
     result = await _run_docker(ctx, host, argv)
@@ -277,12 +310,39 @@ async def ssh_docker_images(
     host: str,
     ctx: Context,
     include_labels: bool = False,
+    reference: str | None = None,
+    dangling: bool | None = None,
+    label: str | None = None,
 ) -> dict[str, Any]:
     """List local images, parsed from ``docker images --format '{{json .}}'``.
 
     ``include_labels`` defaults to False -- same rationale as ``ssh_docker_ps``.
+
+    Server-side filters map directly to Docker ``--filter KEY=VALUE`` flags.
+    All inputs are validated BEFORE any SSH connection opens:
+
+    - ``reference``: image reference with optional glob wildcards.
+      ``nginx``, ``nginx:1.21``, ``nginx:*``, ``ghcr.io/org/*:*``,
+      ``alpine@sha256:abc...``. The ``*`` / ``?`` are Docker glob wildcards
+      passed verbatim to the daemon (not shell-expanded).
+    - ``dangling``: ``True`` -> only untagged images (``<none>:<none>``);
+      ``False`` -> only tagged. Renders as ``dangling=true|false``
+      (lowercase, matching Docker's expected literal).
+    - ``label``: bare key (``builder``) or key=value (``builder=ci``).
+
+    Multiple filters AND together.
     """
+    if reference is not None:
+        _validate_reference(reference)
+    if label is not None:
+        _validate_label(label)
     argv = ["images", "--format", "{{json .}}"]
+    if reference is not None:
+        argv.extend(["--filter", f"reference={reference}"])
+    if dangling is not None:
+        argv.extend(["--filter", f"dangling={'true' if dangling else 'false'}"])
+    if label is not None:
+        argv.extend(["--filter", f"label={label}"])
     result = await _run_docker(ctx, host, argv)
     images = _parse_json_lines(result.get("stdout", ""))
     if not include_labels:
@@ -299,13 +359,29 @@ async def ssh_docker_compose_ps(
     ctx: Context,
     include_labels: bool = False,
     compose_v1: bool = False,
+    service: str | None = None,
+    status: Literal["paused", "restarting", "removing", "running", "dead", "created", "exited"] | None = None,
 ) -> dict[str, Any]:
     """List services for a compose project. Parsed from ``compose ps --format json``.
 
     ``include_labels`` defaults to False -- same rationale as ``ssh_docker_ps``.
     Set ``compose_v1=True`` on hosts still running the legacy ``docker-compose``
     standalone binary; default is the v2 ``docker compose`` plugin.
+
+    Server-side filters (validated before any SSH I/O):
+
+    - ``service``: narrow output to one named service. Passed as a trailing
+      positional argument per Compose CLI convention. Validated against
+      ``[A-Za-z0-9][A-Za-z0-9_.-]*``.
+    - ``status``: filter by container state. Seven values, including
+      ``removing`` which is compose-only (it appears here but NOT in
+      ``ssh_docker_ps``'s status set).
+
+    Argv ordering is deterministic: ``--filter status=...`` (flag) before
+    ``<service>`` (positional), matching Compose's strict-ordering rule.
     """
+    if service is not None:
+        _validate_name("service", service)
     settings = settings_from(ctx)
     pool = pool_from(ctx)
     resolved = resolve_host(ctx, host)
@@ -316,6 +392,10 @@ async def ssh_docker_compose_ps(
     # listable here when sftp/ls of the same path is blocked.
     canonical = await resolve_path(conn, compose_file, policy, settings, must_exist=True)
     argv = ["-f", canonical, "ps", "--format", "json"]
+    if status is not None:
+        argv.extend(["--filter", f"status={status}"])
+    if service is not None:
+        argv.append(service)
     result = await _run_docker(ctx, host, argv, compose=True, compose_v1=compose_v1)
     services = _parse_json_lines(result.get("stdout", ""))
     if not include_labels:

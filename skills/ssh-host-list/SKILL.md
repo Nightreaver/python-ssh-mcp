@@ -31,6 +31,7 @@ Each `HostListEntry` carries:
 | `platform` | str | `"posix"` or `"windows"` |
 | `user` | str | SSH login user |
 | `auth_method` | str | `"agent"`, `"key"`, or `"password"` -- method label only, not the secret |
+| `has_notes` | bool | INC-055: `True` when the host has operator notes in `hosts.toml` OR an agent-notes sidecar exists. Use to decide whether `ssh_host_notes(host=alias)` is worth a follow-up call. |
 
 ## When to call it
 

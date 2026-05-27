@@ -5,11 +5,22 @@ description: Diagnose and operate systemd services via SSH
 # SSH Systemd Diagnostics
 
 Safe-tier read tools for inspecting systemd services without root access, plus
-`ssh_sudo_exec` examples for lifecycle operations that require root.
+dedicated mutation tools for lifecycle operations that require root.
 
 All tools in Section 1 carry `tags={"safe", "read", "group:systemctl"}` and
-work without any `ALLOW_*` flag. Lifecycle operations in Section 3 require
-`ALLOW_SUDO=true` **and** `ALLOW_DANGEROUS_TOOLS=true`.
+work without any `ALLOW_*` flag. Lifecycle operations in Section 3 are
+dangerous-tier wrappers (`ssh_systemctl_start` / `_stop` / `_restart` /
+`_reload` / `_enable` / `_disable` / `_mask` / `_unmask` / `_reset_failed`)
+that require `ALLOW_DANGEROUS_TOOLS=true` and root on the target (use a
+sudoers-enabled SSH account or `ssh_sudo_exec` for the rare `daemon-reload`
+case that has no dedicated wrapper).
+
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
 
 ---
 
@@ -186,69 +197,102 @@ with `ssh_sudo_exec` (see Section 3).
 
 ---
 
-## 3. Lifecycle ops via `ssh_sudo_exec`
+## 3. Lifecycle ops via dedicated `ssh_systemctl_*` mutation tools
 
-Lifecycle mutations require root. Use `ssh_sudo_exec` with both
-`ALLOW_SUDO=true` **and** `ALLOW_DANGEROUS_TOOLS=true` set in the server
-environment. polkit can relax the root requirement on a per-operation basis
-if the operator configures it, but the server-side flags must still be set.
+Lifecycle mutations have dedicated dangerous-tier wrappers. They require
+`ALLOW_DANGEROUS_TOOLS=true` on the server. Each tool needs root on the
+target -- use a sudoers-enabled SSH account, polkit, or `ssh_sudo_exec`
+for the rare `daemon-reload` case that has no dedicated wrapper.
+
+Each wrapper returns a structured `SystemctlUnitActionResult` (host, unit,
+action, exit_code, stdout, stderr, duration_ms, output_warnings) instead of
+the raw `ExecResult` you'd get from `ssh_exec_run`. Routing through these
+tools also keeps the audit trail named after the action (`ssh_systemctl_restart`)
+rather than a generic `ssh_exec_run` line.
 
 ### Start a unit
 
 ```python
-ssh_sudo_exec(host="web01", command="systemctl start nginx.service")
+ssh_systemctl_start(host="web01", unit="nginx.service")
 ```
 
 ### Stop a unit
 
 ```python
-ssh_sudo_exec(host="web01", command="systemctl stop nginx.service")
+ssh_systemctl_stop(host="web01", unit="nginx.service")
 ```
 
 ### Restart a unit
 
 ```python
-ssh_sudo_exec(host="web01", command="systemctl restart nginx.service")
+ssh_systemctl_restart(host="web01", unit="nginx.service")
 ```
 
 ### Reload (without full restart - requires ExecReload= in unit file)
 
 ```python
-ssh_sudo_exec(host="web01", command="systemctl reload nginx.service")
+ssh_systemctl_reload(host="web01", unit="nginx.service")
 ```
 
 ### Enable a unit (survive reboot)
 
 ```python
-ssh_sudo_exec(host="web01", command="systemctl enable nginx.service")
+ssh_systemctl_enable(host="web01", unit="nginx.service")
 ```
 
 ### Disable a unit
 
 ```python
-ssh_sudo_exec(host="web01", command="systemctl disable nginx.service")
+ssh_systemctl_disable(host="web01", unit="nginx.service")
+```
+
+### Mask / unmask a unit
+
+```python
+ssh_systemctl_mask(host="web01", unit="nginx.service")
+ssh_systemctl_unmask(host="web01", unit="nginx.service")
+```
+
+### Clear a failed-unit state
+
+```python
+ssh_systemctl_reset_failed(host="web01", unit="nginx.service")
 ```
 
 ### daemon-reload (required after unit file changes)
 
-Always run this before starting or restarting a unit whose file you just
-changed via `ssh_upload` / `ssh_edit`:
+There is no dedicated wrapper for `daemon-reload` -- it is a daemon-wide
+verb, not a per-unit action. Use `ssh_sudo_exec` (or root SSH) for it.
+Run this before starting or restarting a unit whose file you just changed
+via `ssh_upload` / `ssh_edit`:
 
 ```python
 ssh_sudo_exec(host="web01", command="systemctl daemon-reload")
 ```
 
+(`systemctl daemon-reload` does NOT trigger the cheatsheet rejection --
+the matcher only covers per-unit verbs.)
+
 ### Combined: deploy + reload
 
 ```python
-# 1. Upload the changed unit file (low-access tier)
-ssh_upload(host="web01", path="/etc/systemd/system/myapp.service", content_base64=...)
+import base64
+
+unit_bytes = open("myapp.service", "rb").read()
+
+# 1. Upload the changed unit file (low-access tier).
+#    Path must be in the host's path_allowlist.
+ssh_upload(
+    host="web01",
+    path="/etc/systemd/system/myapp.service",
+    content_base64=base64.b64encode(unit_bytes).decode("ascii"),
+)
 
 # 2. Reload the daemon to pick up the new file
 ssh_sudo_exec(host="web01", command="systemctl daemon-reload")
 
 # 3. Restart the service
-ssh_sudo_exec(host="web01", command="systemctl restart myapp.service")
+ssh_systemctl_restart(host="web01", unit="myapp.service")
 
 # 4. Verify it came up healthy
 ssh_systemctl_is_active(host="web01", unit="myapp.service")
@@ -281,7 +325,9 @@ Then re-connect (group membership changes only take effect on new logins).
 `systemctl --user` operates on the per-user instance of systemd (session
 scope). The dedicated tools in this runbook always target the system
 instance. To inspect user units, use the generic `ssh_exec_run` (dangerous
-tier):
+tier). This call matches the `systemctl status` cheatsheet pattern; the
+operator must enable `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` because
+there is no `--user`-scoped wrapper:
 
 ```python
 ssh_exec_run(

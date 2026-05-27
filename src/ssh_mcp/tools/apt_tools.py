@@ -19,8 +19,10 @@ Validators:
 
 - ``_validate_pattern``: glob shape for ``apt list <pat>`` and
   ``apt-cache search <pat>``. Allows ``[A-Za-z0-9._*?+-]{1,128}``.
-- ``_validate_package_name``: Debian package-name shape. Lowercase
-  only by convention; matches ``^[a-z0-9][a-z0-9.+-]{0,127}$``.
+- ``validate_package_name`` / ``validate_packages``: live in
+  :mod:`ssh_mcp.models.apt` -- they enforce the Debian package-name
+  invariant shared by the read tier (``ssh_apt_show``) and the
+  dangerous tier (install / remove / hold / unhold).
 
 Platform gating
 ---------------
@@ -41,15 +43,22 @@ from __future__ import annotations
 
 import re
 import shlex
+import time
+from typing import Literal
 
 from fastmcp import Context
 
 from ..app import mcp_server
 from ..models.apt import (
+    AptHoldsResult,
     AptListMode,
     AptListResult,
+    AptMutationAction,
+    AptMutationResult,
     AptSearchResult,
     AptShowResult,
+    validate_package_name,
+    validate_packages,
 )
 from ..services.apt_parser import (
     parse_apt_list,
@@ -70,11 +79,6 @@ from ._context import pool_from, require_posix, resolve_host, settings_from
 # Conservative: alphanumerics + the wildcard chars apt understands.
 _PATTERN_RE = re.compile(r"^[A-Za-z0-9._*?+\-]{1,128}$")
 
-# Debian package-name shape (subset of policy-manual §5.6.7). Lowercase
-# only by convention -- apt is case-insensitive on lookup but accepting
-# lowercase keeps the regex tight and the audit trail unambiguous.
-_PACKAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.+\-]{0,127}$")
-
 
 def _validate_pattern(pattern: str) -> str:
     """Validate an apt glob pattern.
@@ -91,22 +95,6 @@ def _validate_pattern(pattern: str) -> str:
             "shell metacharacters are not allowed"
         )
     return pattern
-
-
-def _validate_package_name(name: str) -> str:
-    """Validate a Debian package name.
-
-    Returns the validated name unchanged. Rejects empty strings, names
-    containing uppercase, slashes, or shell metacharacters.
-    """
-    if not name:
-        raise ValueError("package name must not be empty")
-    if not _PACKAGE_NAME_RE.match(name):
-        raise ValueError(
-            f"package name {name!r} must match [a-z0-9][a-z0-9.+-]{{0,127}} "
-            "(Debian package name shape, lowercase only)"
-        )
-    return name
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +141,8 @@ async def _run_apt(
     ctx: Context,
     host: str,
     argv: list[str],
+    *,
+    timeout: int | None = None,
 ) -> tuple[str, str, int, list[str], bool]:
     """Execute an apt argv on the remote host.
 
@@ -162,6 +152,11 @@ async def _run_apt(
     sanitiser. ``stdout_truncated`` mirrors :attr:`ExecResult.stdout_truncated`
     so callers can surface the cap-hit flag without re-deriving it from a
     byte-length comparison (which false-positives at exactly the cap size).
+
+    ``timeout`` (seconds) is the per-call override consumed by the mutation
+    tools where the operator may need a longer window than the global
+    ``SSH_COMMAND_TIMEOUT`` for a chunky ``apt-get install``. Read-tier
+    callers omit it and inherit the global default.
     """
     pool = pool_from(ctx)
     settings = settings_from(ctx)
@@ -172,7 +167,7 @@ async def _run_apt(
         conn,
         shlex.join(argv),
         host=policy.hostname,
-        timeout=float(settings.SSH_COMMAND_TIMEOUT),
+        timeout=float(timeout if timeout is not None else settings.SSH_COMMAND_TIMEOUT),
         stdout_cap=settings.SSH_STDOUT_CAP_BYTES,
         stderr_cap=settings.SSH_STDERR_CAP_BYTES,
     )
@@ -277,7 +272,7 @@ async def ssh_apt_show(
     dependencies from ``show``; installed/candidate version + repo
     sources from ``policy``. POSIX + apt only. See SKILL for the merged shape.
     """
-    _validate_package_name(package)
+    validate_package_name(package)
 
     resolved = resolve_host(ctx, host)
     require_posix(resolved, tool="ssh_apt_show", reason="apt-cache is POSIX-only")
@@ -313,3 +308,254 @@ async def ssh_apt_show(
         replaces=show_parsed["replaces"],
         output_warnings=merged_warnings,
     ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Mutation tools (dangerous tier)
+#
+# Five tools sharing one ``_run_apt_mutation`` dispatcher, in the same shape
+# as ``systemctl_tools._run_unit_action`` (C1). All carry the
+# ``{"dangerous", "group:pkg"}`` tagset and ``@audited(tier="dangerous")``.
+# Sudo is NOT auto-prepended -- matching the read-tier convention and the
+# systemctl tier. Each tool builds its argv list-style and ``shlex.join``
+# quotes the tokens, so package names can never reach a shell as anything
+# but single literal tokens. Non-zero exit codes are returned as data; only
+# transport failures escape the tool.
+# ---------------------------------------------------------------------------
+
+
+# Verbs accepted by the shared mutation runner. Derived from the
+# ``AptMutationAction`` Literal so the result-model literal is the single
+# source of truth -- mypy already enforces the per-call-site verb at compile
+# time; this frozenset is the runtime tripwire for any non-typed caller.
+_MUTATION_ACTIONS: frozenset[str] = frozenset(
+    {"install", "upgrade", "remove", "purge", "autoremove", "hold", "unhold"}
+)
+
+# Mutation verbs accepted by ``ssh_apt_mark``. The read-only ``showhold``
+# verb has its own dedicated read-tier tool (``ssh_apt_show_holds``) so
+# this literal stays mutation-only and the tool's tag set stays consistent
+# with its actual blast radius.
+AptMarkAction = Literal["hold", "unhold"]
+
+
+async def _run_apt_mutation(
+    ctx: Context,
+    host: str,
+    *,
+    action: AptMutationAction,
+    argv: list[str],
+    packages: list[str],
+    timeout: int | None,
+) -> dict[str, object]:
+    """Validate ``action``, run ``argv`` on ``host``, and return an
+    ``AptMutationResult`` as a plain dict.
+
+    Shared body for the four mutation tools whose result shape is
+    ``AptMutationResult`` (``install`` / ``upgrade`` / ``remove`` / ``purge`` /
+    ``autoremove`` / ``hold`` / ``unhold``). ``ssh_apt_mark(action="showhold")``
+    has its own ``AptHoldsResult`` shape and bypasses this helper.
+    """
+    if action not in _MUTATION_ACTIONS:
+        # Defensive: caller bug, not user input. Surface as ValueError so
+        # tests catch a typo before it reaches the wire.
+        raise ValueError(f"unsupported apt mutation action: {action!r}")
+
+    resolved = resolve_host(ctx, host)
+    require_posix(resolved, tool="ssh_apt_mutation", reason="apt is POSIX-only")
+    await _probe_apt(ctx, host)
+
+    start = time.monotonic()
+    stdout, stderr, exit_code, output_warnings, stdout_truncated = await _run_apt(
+        ctx,
+        host,
+        argv,
+        timeout=timeout,
+    )
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    return AptMutationResult(
+        host=resolved.hostname,
+        action=action,
+        packages=packages,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        duration_ms=duration_ms,
+        stdout_truncated=stdout_truncated,
+        output_warnings=output_warnings,
+    ).model_dump()
+
+
+@mcp_server.tool(tags={"dangerous", "group:pkg"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_apt_install(
+    host: str,
+    packages: list[str],
+    ctx: Context,
+    *,
+    update_first: bool = False,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``apt-get -y install -- <packages...>`` on the host. Requires root
+    (use a sudoers-enabled SSH account or ``ssh_sudo_exec``). Optionally runs
+    ``apt-get update`` first. See SKILL for details."""
+    validate_packages(packages, action="install")
+    if update_first:
+        # Probe BEFORE attempting ``apt-get update`` so non-Debian hosts get
+        # a clean ``PlatformNotSupported`` instead of a raw ``apt-get: not
+        # found`` exec failure. ``_run_apt_mutation`` re-probes shortly after
+        # -- the duplicate is one cheap ``command -v apt`` exec on the same
+        # cached connection and avoids carrying probe-state across the call.
+        resolved = resolve_host(ctx, host)
+        require_posix(resolved, tool="ssh_apt_install", reason="apt is POSIX-only")
+        await _probe_apt(ctx, host)
+        # Run ``apt-get update`` as a discrete exec so its exit / stderr are
+        # observable in the audit stream. The result we surface is the
+        # install's; if update failed, install will surface the cascade.
+        await _run_apt(ctx, host, ["apt-get", "update"], timeout=timeout)
+    argv = ["apt-get", "-y", "install", "--", *packages]
+    return await _run_apt_mutation(
+        ctx,
+        host,
+        action="install",
+        argv=argv,
+        packages=packages,
+        timeout=timeout,
+    )
+
+
+@mcp_server.tool(tags={"dangerous", "group:pkg"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_apt_upgrade(
+    host: str,
+    ctx: Context,
+    *,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``apt-get -y upgrade`` on the host. Requires root. Caller should
+    typically run ``ssh_apt_install([], update_first=True)`` or ``ssh_exec_run
+    'apt-get update'`` first -- see SKILL for the upgrade workflow and why
+    this tool deliberately does NOT cover ``do-release-upgrade``."""
+    argv = ["apt-get", "-y", "upgrade"]
+    return await _run_apt_mutation(
+        ctx,
+        host,
+        action="upgrade",
+        argv=argv,
+        packages=[],
+        timeout=timeout,
+    )
+
+
+@mcp_server.tool(tags={"dangerous", "group:pkg"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_apt_remove(
+    host: str,
+    packages: list[str],
+    ctx: Context,
+    *,
+    purge: bool = False,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``apt-get -y remove -- <packages...>`` (or ``purge`` when
+    ``purge=True``) on the host. Requires root. ``purge`` also removes the
+    package's config files. See SKILL for details."""
+    validate_packages(packages, action="purge" if purge else "remove")
+    verb = "purge" if purge else "remove"
+    action: AptMutationAction = "purge" if purge else "remove"
+    argv = ["apt-get", "-y", verb, "--", *packages]
+    return await _run_apt_mutation(
+        ctx,
+        host,
+        action=action,
+        argv=argv,
+        packages=packages,
+        timeout=timeout,
+    )
+
+
+@mcp_server.tool(tags={"dangerous", "group:pkg"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_apt_autoremove(
+    host: str,
+    ctx: Context,
+    *,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``apt-get -y autoremove`` on the host. Requires root. Removes
+    packages installed as dependencies that are no longer needed. See SKILL
+    for details."""
+    argv = ["apt-get", "-y", "autoremove"]
+    return await _run_apt_mutation(
+        ctx,
+        host,
+        action="autoremove",
+        argv=argv,
+        packages=[],
+        timeout=timeout,
+    )
+
+
+@mcp_server.tool(tags={"safe", "read", "group:pkg"}, version="1.0")
+@audited(tier="read")
+async def ssh_apt_show_holds(
+    host: str,
+    ctx: Context,
+    *,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``apt-mark showhold`` on the host. Read-only -- no root required.
+
+    Returns ``AptHoldsResult`` with a parsed ``held`` list so callers don't
+    re-split stdout. See SKILL for details."""
+    resolved = resolve_host(ctx, host)
+    require_posix(resolved, tool="ssh_apt_show_holds", reason="apt-mark is POSIX-only")
+    await _probe_apt(ctx, host)
+
+    start = time.monotonic()
+    stdout, stderr, exit_code, output_warnings, stdout_truncated = await _run_apt(
+        ctx,
+        host,
+        ["apt-mark", "showhold"],
+        timeout=timeout,
+    )
+    duration_ms = int((time.monotonic() - start) * 1000)
+    held = [line.strip() for line in stdout.splitlines() if line.strip()]
+    return AptHoldsResult(
+        host=resolved.hostname,
+        held=held,
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        stdout_truncated=stdout_truncated,
+        output_warnings=output_warnings,
+    ).model_dump()
+
+
+@mcp_server.tool(tags={"dangerous", "group:pkg"}, version="1.0")
+@audited(tier="dangerous")
+async def ssh_apt_mark(
+    host: str,
+    action: AptMarkAction,
+    packages: list[str],
+    ctx: Context,
+    *,
+    timeout: int | None = None,
+) -> dict[str, object]:
+    """Run ``apt-mark hold|unhold -- <packages...>`` on the host. Requires
+    root. Use ``ssh_apt_show_holds`` for the read-only ``showhold`` variant.
+
+    ``action`` is ``hold`` or ``unhold``; ``packages`` must be non-empty.
+    See SKILL for details."""
+    validate_packages(packages, action=action)
+    argv = ["apt-mark", action, "--", *packages]
+    return await _run_apt_mutation(
+        ctx,
+        host,
+        action=action,
+        argv=argv,
+        packages=packages,
+        timeout=timeout,
+    )

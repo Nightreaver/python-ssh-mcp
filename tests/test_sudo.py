@@ -76,15 +76,51 @@ def test_script_wrapper_with_password_prepends_password_line() -> None:
 # --- fetch_sudo_password priority ---
 
 
-def test_password_cmd_takes_priority() -> None:
+def test_password_cmd_used_when_no_per_host_keyring() -> None:
     class Ret:
         returncode = 0
         stdout = "from-cmd\n"
         stderr = ""
 
     with patch("ssh_mcp.ssh.sudo.subprocess.run", return_value=Ret()):
-        pw = fetch_sudo_password(_settings(SSH_SUDO_PASSWORD_CMD="pass show ops/sudo"))
+        pw = fetch_sudo_password(
+            _settings(SSH_SUDO_PASSWORD_CMD="pass show ops/sudo"), "web01"
+        )
     assert pw == "from-cmd"
+
+
+def test_per_host_keyring_beats_global_cmd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-host keyring entry wins over the global SSH_SUDO_PASSWORD_CMD."""
+    import ssh_mcp.ssh.sudo as sudo_module
+
+    keyring_stub = type(
+        "K", (), {"get_password": staticmethod(lambda svc, user: "alfred-pw" if user == "alfred" else None)}
+    )
+    monkeypatch.setattr(sudo_module, "_keyring", keyring_stub)
+    with patch("ssh_mcp.ssh.sudo.subprocess.run") as run_mock:
+        pw = fetch_sudo_password(
+            _settings(SSH_SUDO_PASSWORD_CMD="should-not-run"), "alfred"
+        )
+    assert pw == "alfred-pw"
+    run_mock.assert_not_called()
+
+
+def test_falls_back_to_default_keyring_when_alias_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unknown alias → default keyring entry serves as fleet-wide fallback."""
+    import ssh_mcp.ssh.sudo as sudo_module
+
+    keyring_stub = type(
+        "K",
+        (),
+        {
+            "get_password": staticmethod(
+                lambda svc, user: "fleet-pw" if user == "default" else None
+            )
+        },
+    )
+    monkeypatch.setattr(sudo_module, "_keyring", keyring_stub)
+    pw = fetch_sudo_password(_settings(), "unknown-host")
+    assert pw == "fleet-pw"
 
 
 def test_password_cmd_failure_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +131,7 @@ def test_password_cmd_failure_falls_through(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.delenv("SSH_SUDO_PASSWORD", raising=False)
     with patch("ssh_mcp.ssh.sudo.subprocess.run", return_value=Ret()):
-        pw = fetch_sudo_password(_settings(SSH_SUDO_PASSWORD_CMD="bad cmd"))
+        pw = fetch_sudo_password(_settings(SSH_SUDO_PASSWORD_CMD="bad cmd"), "web01")
     # No keyring, no env → passwordless.
     assert pw is None
 
@@ -104,7 +140,7 @@ def test_env_password_is_ignored_by_fetch(monkeypatch: pytest.MonkeyPatch) -> No
     # INC-009: SSH_SUDO_PASSWORD is rejected at lifespan startup. fetch()
     # itself ignores it so a rogue env var cannot silently take effect.
     monkeypatch.setenv("SSH_SUDO_PASSWORD", "env-pw")
-    assert fetch_sudo_password(_settings()) is None
+    assert fetch_sudo_password(_settings(), "web01") is None
 
 
 def test_reject_env_password_raises_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,7 +161,7 @@ def test_reject_env_password_passes_when_unset(monkeypatch: pytest.MonkeyPatch) 
 
 def test_no_source_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SSH_SUDO_PASSWORD", raising=False)
-    assert fetch_sudo_password(_settings()) is None
+    assert fetch_sudo_password(_settings(), "web01") is None
 
 
 def test_password_cmd_timeout_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,7 +174,7 @@ def test_password_cmd_timeout_propagates(monkeypatch: pytest.MonkeyPatch) -> Non
         patch("ssh_mcp.ssh.sudo.subprocess.run", side_effect=_raise),
         pytest.raises(subprocess.TimeoutExpired),
     ):
-        fetch_sudo_password(_settings(SSH_SUDO_PASSWORD_CMD="stuck"))
+        fetch_sudo_password(_settings(SSH_SUDO_PASSWORD_CMD="stuck"), "web01")
 
 
 # --- run_sudo / run_sudo_script plumb through to exec.run ---

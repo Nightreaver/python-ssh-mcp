@@ -11,6 +11,17 @@ A read-only audit pass you can run against a host to confirm:
 - Release artifacts on disk match their signatures.
 - No surprising SUID / world-writable files appeared since last audit.
 
+## Default-on cheatsheet rejection (since v1.9.0)
+
+`ssh_exec_run` refuses commands that have a native MCP tool -- see
+`skills/ssh-exec-run/SKILL.md`. The native-tool flow below avoids
+that. Composite scripts (where the script IS the artefact) opt out
+via `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true` at the operator level.
+
+The `find -perm` calls in Section 4 pass through `ssh_exec_run`
+cleanly -- `find` is not cheatsheet-matched and `ssh_find` cannot
+filter by permission bits, so there is no native equivalent.
+
 Not a full security hardening review -- that belongs with a dedicated
 security tool (lynis, oscap, etc.). This is the "did something change
 since I last looked?" pass that the LLM can run on a schedule without

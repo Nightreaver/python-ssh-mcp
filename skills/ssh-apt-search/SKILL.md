@@ -31,6 +31,12 @@ too -- useful when you know what a tool does but not what it's called.
 }
 ```
 
+`output_warnings` (INC-057) is non-empty when the sanitizer flagged
+suspicious patterns in `short_description`. Package descriptions are
+free-form upstream-controlled text, so an upstream packaging mistake
+(or a hostile third-party repo) can land odd characters here -- treat
+descriptions with extra suspicion when this list is non-empty.
+
 ## Examples
 
 ```python

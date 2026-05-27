@@ -15,6 +15,9 @@ The `command_allowlist` check from `ssh_exec_run` applies the same way -- if
 neither the per-host nor env allowlist has an entry, you must also set
 `ALLOW_ANY_COMMAND=true` or the call is rejected.
 
+**POSIX-only.** `sudo` is a Unix concept; Windows targets raise
+`PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | default | notes |
@@ -25,7 +28,11 @@ neither the per-host nor env allowlist has an entry, you must also set
 
 ## Returns
 
-Same `ExecResult` shape as `ssh_exec_run`.
+Same `ExecResult` shape as `ssh_exec_run`, including
+[`output_warnings`](../ssh-exec-run/SKILL.md#returns) (INC-057).
+Privileged stdout has the same injection surface as unprivileged
+stdout -- arguably more, since root-readable files (motd, banners,
+log tails) can be operator-customized. Check the field.
 
 ## Password source priority
 

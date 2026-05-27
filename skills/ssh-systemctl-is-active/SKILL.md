@@ -46,6 +46,14 @@ normal - it means the unit is not active. Returns the state string directly.
 ssh_systemctl_is_active(host="web01", unit="nginx.service")
 ```
 
+## Validation
+
+`unit` is rejected before the call leaves the server if it contains
+shell metacharacters, slashes, or characters outside `[A-Za-z0-9@._-]`.
+When a dot is present, the suffix must be a known unit type
+(`service | socket | target | timer | path | mount | automount |
+swap | slice | scope | device`); bare names like `nginx` are accepted.
+
 ## Common failures
 
 - Any non-zero exit is normal and expected (means unit is not `active`). Check `state`, not just `exit_code`.

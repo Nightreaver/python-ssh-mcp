@@ -200,3 +200,51 @@ class JournalctlResult(BaseModel):
     # the most common prompt-injection vector (anything that ends up
     # in the journal: motd, sshd auth lines, application crash dumps).
     output_warnings: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Systemctl mutation tools (start / stop / restart / reload / enable / disable
+# / mask / unmask / reset-failed). One shared result shape, distinguished by
+# the ``action`` literal so the LLM can correlate without re-parsing the
+# tool name.
+# ---------------------------------------------------------------------------
+
+
+#: The exhaustive verb set for ``ssh_systemctl_<verb>`` mutation tools.
+SystemctlUnitAction = Literal[
+    "start",
+    "stop",
+    "restart",
+    "reload",
+    "enable",
+    "disable",
+    "mask",
+    "unmask",
+    "reset-failed",
+]
+
+
+class SystemctlUnitActionResult(BaseModel):
+    """Result of a systemctl unit-level mutation.
+
+    Shared shape across ``ssh_systemctl_{start,stop,restart,reload,enable,
+    disable,mask,unmask,reset_failed}``. Non-zero exit codes are returned
+    as data (not raised); only transport failures escape the tool.
+
+    Note: per-call timing is recorded on the ``ssh_mcp.audit`` log line
+    (``duration_ms``), so it is not duplicated in the result body.
+    """
+
+    model_config = _RESULT_MODEL_CONFIG
+
+    host: str
+    unit: str
+    action: SystemctlUnitAction
+    exit_code: int
+    stdout: str
+    stderr: str
+    # INC-058: output_sanitizer warnings about stdout/stderr. systemctl's
+    # own output is tame, but errors can echo unit names / paths from the
+    # remote host and a hostile unit file can plant LLM-confusing tokens
+    # in its description.
+    output_warnings: list[str] = []

@@ -10,6 +10,8 @@ Runs `docker images --format '{{json .}}'`, parses per-image JSON. Filter kwargs
 (`reference`, `dangling`, `label`) map directly to Docker's `--filter KEY=VALUE`
 flags. Filters are validated before any SSH connection is opened.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | notes |

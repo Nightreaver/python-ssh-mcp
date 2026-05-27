@@ -125,10 +125,12 @@ def _ctx(
     upload_cap: int = 256 << 20,  # 256 MiB
 ) -> Any:
     """Build a Context whose pool returns connections wired to the given SFTPs."""
+    src_sftp_real = src_sftp or _FakeSftp()
+    dst_sftp_real = dst_sftp or _FakeSftp()
     src_conn = MagicMock()
-    src_conn.start_sftp_client = MagicMock(return_value=src_sftp or _FakeSftp())
+    src_conn.start_sftp_client = MagicMock(return_value=src_sftp_real)
     dst_conn = MagicMock()
-    dst_conn.start_sftp_client = MagicMock(return_value=dst_sftp or _FakeSftp())
+    dst_conn.start_sftp_client = MagicMock(return_value=dst_sftp_real)
 
     pool = MagicMock()
 
@@ -138,6 +140,14 @@ def _ctx(
         return src_conn if resolved.hostname == src_alias else dst_conn
 
     pool.acquire = AsyncMock(side_effect=acquire)
+
+    # INC-pool-sftp: ssh_transfer now uses pool.sftp(resolved) instead of
+    # conn.start_sftp_client(). Route by ResolvedHost.hostname to the matching
+    # fake SFTP, preserving each side's stat_table / capture buffer.
+    def fake_pool_sftp(resolved: Any) -> Any:
+        return src_sftp_real if resolved.hostname == src_alias else dst_sftp_real
+
+    pool.sftp = MagicMock(side_effect=fake_pool_sftp)
 
     hosts = {src_alias: _policy(src_alias), dst_alias: _policy(dst_alias)}
 

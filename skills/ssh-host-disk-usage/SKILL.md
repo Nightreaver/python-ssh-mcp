@@ -10,6 +10,8 @@ Runs `df -PTh` on the remote host (POSIX format, with types, human sizes)
 and parses each line into a structured entry. Full partitions are the single
 most common silent-failure cause on Linux boxes; this is a triage reflex.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | notes |
@@ -62,8 +64,12 @@ To find almost-full mounts in a follow-up step, filter entries where
 ## Common failures
 
 - `HostNotAllowed` / `HostBlocked` -- see host policy.
-- Unusual `df` output (BSD `df`, custom format) -> some entries may be dropped
-  by the parser. The tool logs but does not raise.
+- `PlatformNotSupported` -- Windows target. Use `ssh_exec_run "wmic
+  logicaldisk get name,freespace,size"` once allowlisted.
+- Unusual `df` output (BSD `df`, custom format) -> rows that don't split
+  into the expected 7 columns are silently dropped from `entries`. The
+  call still succeeds with a shorter list; check `entries` length if you
+  expected a specific mount to appear.
 
 ## Related
 

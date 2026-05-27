@@ -45,6 +45,55 @@ def _validate_name(kind: str, name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Filter validators for ps / images / compose ps
+# ---------------------------------------------------------------------------
+
+# Label filter: bare key (`role`) or key=value (`role=frontend`). Key allows
+# Kubernetes-style domain prefixes (`app.kubernetes.io/name`); value covers
+# the common SemVer / hash / URI shapes. Shell metacharacters are rejected.
+_DOCKER_LABEL_KEY_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,128}$")
+_DOCKER_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._:/=+\-]{1,256}$")
+
+
+def _validate_label(label: str) -> str:
+    """Validate a docker ``--filter label=...`` argument.
+
+    Accepts the two forms Docker recognises: bare key (``role``) or
+    key=value (``role=frontend``). Key length <=128, value length <=256.
+    Shell metacharacters in either side raise ``ValueError`` BEFORE any
+    SSH connection is opened.
+    """
+    if "=" in label:
+        key, _, value = label.partition("=")
+        if not _DOCKER_LABEL_KEY_RE.match(key):
+            raise ValueError(f"label filter key {key!r} must match [A-Za-z0-9._/-]{{1,128}}")
+        if not _DOCKER_LABEL_VALUE_RE.match(value):
+            raise ValueError(f"label filter value {value!r} must match [A-Za-z0-9._:/=+-]{{1,256}}")
+    else:
+        if not _DOCKER_LABEL_KEY_RE.match(label):
+            raise ValueError(f"label filter {label!r} must match [A-Za-z0-9._/-]{{1,128}}")
+    return label
+
+
+# Image reference for `docker images --filter reference=...`. Same as
+# `_DOCKER_NAME_RE` plus `:` (tag separator), `@` (digest), `*` and `?`
+# (Docker glob wildcards passed verbatim to the daemon, not shell-expanded).
+_DOCKER_REFERENCE_RE = re.compile(r"^[A-Za-z0-9._/:*?@\-]{1,256}$")
+
+
+def _validate_reference(reference: str) -> str:
+    """Validate a docker image reference filter, allowing glob wildcards.
+
+    Accepts: ``nginx``, ``nginx:1.21``, ``nginx:*``, ``ghcr.io/org/*:*``,
+    ``alpine@sha256:abc...``. Rejects shell metacharacters (``;``, ``|``,
+    ``$``, backticks, spaces, newlines).
+    """
+    if not _DOCKER_REFERENCE_RE.match(reference):
+        raise ValueError(f"reference filter {reference!r} must match [A-Za-z0-9._/:*?@-]{{1,256}}")
+    return reference
+
+
+# ---------------------------------------------------------------------------
 # Host-escape deny-list for `docker run` (INC-022 / INC-024 / INC-025)
 # ---------------------------------------------------------------------------
 

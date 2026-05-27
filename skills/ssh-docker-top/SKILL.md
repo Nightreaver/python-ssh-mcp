@@ -10,6 +10,8 @@ Runs `docker top <container>` and returns the raw `ps`-style output. Docker
 does NOT expose a JSON format for this subcommand, so the output lands in
 `stdout` unchanged for the caller to parse.
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | default | notes |

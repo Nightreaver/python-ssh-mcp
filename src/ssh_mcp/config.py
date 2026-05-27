@@ -83,6 +83,18 @@ class Settings(BaseSettings):
     # Empty allowlist now DENIES — this flag is the only way to run any command.
     ALLOW_ANY_COMMAND: bool = False
 
+    # Default-on rejection of `ssh_exec_run` / `_streaming` / `ssh_sudo_exec`
+    # commands that match the cheatsheet (services/exec_cheatsheet.py).
+    # Cheatsheet patterns are command shapes that have a dedicated native MCP
+    # tool -- heredoc / tee / echo > path file-writes, leading `docker`,
+    # `systemctl <verb>`, `journalctl`, `apt(-get) install|remove|upgrade|...`,
+    # single mkdir/cp/mv/rm, output redirection to a real file. When False
+    # (default), matching commands are refused with `CommandIsCheatsheetMatch`
+    # and a hint pointing to the native tool. Set True to temporarily disable
+    # for legacy automation; the intent is that operators fix the automation
+    # to use the wrapper rather than relying on this opt-out long-term.
+    SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS: bool = False
+
     # Docker CLI invocation. Default `docker`; set to `podman` for Podman
     # hosts (API-compatible CLI + JSON output). Shell-split so operators
     # can prefix with `sudo`, `env`, wrappers, etc. Per-host override:
@@ -225,7 +237,7 @@ class Settings(BaseSettings):
     MCP_HTTP_PORT: int = 8000
 
     # --- Observability ---
-    VERSION: str = "1.1.0"
+    VERSION: str = "1.2.0"
     LOG_LEVEL: str = "INFO"
     OTEL_ENABLED: bool = True
 

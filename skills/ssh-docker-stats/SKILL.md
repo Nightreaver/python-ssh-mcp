@@ -10,6 +10,8 @@ Runs `docker stats --no-stream --format '{{json .}}'` and parses the output
 to a list. Snapshot only -- does not stream. For live tail, use
 `ssh_exec_run_streaming` with `docker stats` (requires exec tier).
 
+**POSIX-only.** Windows targets raise `PlatformNotSupported`.
+
 ## Inputs
 
 | name | type | required | notes |

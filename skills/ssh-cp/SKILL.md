@@ -63,5 +63,6 @@ ssh_cp(host="web01", src="/etc/nginx/nginx.conf", dst="/etc/nginx/nginx.conf.pre
 ## Related
 
 - [`ssh_mv`](../ssh-mv/SKILL.md) -- atomic rename / move.
-- [`ssh_upload`](../ssh-upload/SKILL.md) -- push fresh content from outside the host.
+- [`ssh_upload`](../ssh-upload/SKILL.md) -- push fresh content from outside the host;
+  for large payloads (>~5 MiB) use the `local_path` mode to bypass base64 encoding.
 - [`ssh_edit`](../ssh-edit/SKILL.md) -- atomic in-place edit (no manual backup needed).

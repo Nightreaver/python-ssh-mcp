@@ -61,6 +61,26 @@ class PathRestricted(SSHMCPError):
     """
 
 
+class LocalPathPolicyError(SSHMCPError):
+    """A `local_path=` argument failed the MCP-host filesystem allowlist check.
+
+    Raised by :func:`ssh_mcp.services.local_path_policy.resolve_local_path`
+    on any of:
+
+    - ``SSH_LOCAL_TRANSFER_ROOTS`` is empty (mode disabled entirely)
+    - the canonical path is not a child of any allowlisted root (escape
+      attempt, typo, or root not yet configured)
+    - read-mode and the target does not exist or is not a regular file
+    - write-mode and the parent directory does not exist
+
+    Parallel to :class:`PathNotAllowed` but for the MCP server's OWN
+    filesystem rather than a remote host's. The message names the
+    configuration knob (``SSH_LOCAL_TRANSFER_ROOTS`` /
+    ``SSH_LOCAL_TRANSFER_MAX_BYTES``) when relevant so the operator can fix
+    the env without grep'ing the codebase.
+    """
+
+
 class PlatformNotSupported(SSHMCPError):
     """Tool doesn't run on this host's platform (e.g. POSIX-only on Windows).
 

@@ -84,6 +84,8 @@ ssh_edit(
 ## Related
 
 - [`ssh_patch`](../ssh-patch/SKILL.md) -- when you have a unified diff.
-- [`ssh_upload`](../ssh-upload/SKILL.md) -- full-file overwrite.
+- [`ssh_upload`](../ssh-upload/SKILL.md) -- full-file overwrite; for files
+  over 10 MiB that exceed `SSH_EDIT_MAX_FILE_BYTES`, use `local_path` mode
+  in `ssh_upload` to push a large replacement without base64 encoding.
 - [`ssh_cp`](../ssh-cp/SKILL.md) -- take a backup first if you want a manual rollback.
 - [`ssh_sftp_download`](../ssh-sftp-download/SKILL.md) -- read current contents to construct `old_string`.

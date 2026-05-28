@@ -89,6 +89,16 @@ class StatResult(BaseModel):
 
 
 class WriteResult(BaseModel):
+    """Outcome of a file-mutating low-access tool (ssh_upload / ssh_deploy /
+    ssh_mkdir / ssh_cp / ssh_mv / ssh_link / ssh_edit / ssh_patch / ...).
+
+    ``local_path_written`` is populated only when ``ssh_upload`` / ``ssh_deploy``
+    sourced its bytes from ``local_path=`` (v1.3.0). It carries the
+    canonical MCP-host path the bytes were read from, for the audit trail
+    -- the LLM never saw the payload but the operator should be able to
+    correlate the destination back to its local source.
+    """
+
     model_config = _RESULT_MODEL_CONFIG
 
     host: str
@@ -96,6 +106,7 @@ class WriteResult(BaseModel):
     success: bool
     bytes_written: int = 0
     message: str | None = None
+    local_path_written: str | None = None
 
 
 class PingResult(BaseModel):
@@ -298,6 +309,22 @@ class FindResult(BaseModel):
 
 
 class DownloadResult(BaseModel):
+    """Outcome of ``ssh_sftp_download``.
+
+    Two delivery modes:
+
+    - default (no ``local_path``): bytes round-trip through the MCP JSON
+      channel as base64 in ``content_base64``. Subject to
+      ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB); larger files come
+      back with ``truncated=True`` and an empty payload.
+    - ``local_path=`` mode (v1.3.0): the MCP server streams the file
+      directly to disk at the caller-supplied local path.
+      ``content_base64`` is empty, ``truncated`` is False, and
+      ``local_path_written`` carries the canonical MCP-host path the
+      bytes landed at. Subject to ``SSH_LOCAL_TRANSFER_MAX_BYTES``
+      (default 2 GiB) instead of the upload cap.
+    """
+
     model_config = _RESULT_MODEL_CONFIG
 
     host: str
@@ -311,6 +338,10 @@ class DownloadResult(BaseModel):
     # text view should `sanitize()` after decoding. Empty for files
     # that look textually clean or aren't text at all.
     output_warnings: list[str] = []
+    # v1.3.0: populated only in `local_path` mode. Canonical MCP-host
+    # absolute path the file was written to. None when the download went
+    # back via the base64 channel.
+    local_path_written: str | None = None
 
 
 class HashResult(BaseModel):

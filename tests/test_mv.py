@@ -21,7 +21,8 @@ import pytest
 
 from ssh_mcp.config import Settings
 from ssh_mcp.models.policy import AuthPolicy, HostPolicy
-from ssh_mcp.tools import low_access_tools
+from ssh_mcp.tools.low_access import _helpers as low_access_helpers
+from ssh_mcp.tools.low_access import fs_tools
 from ssh_mcp.tools.low_access_tools import WriteError, ssh_mv
 
 
@@ -125,12 +126,14 @@ def _ctx(
 
 
 def _bypass_path_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _resolve(
-        _conn: Any, path: str, _policy_arg: Any, _settings: Any, *_a: Any, **_kw: Any
-    ) -> str:
+    async def _resolve(_conn: Any, path: str, _policy_arg: Any, _settings: Any, *_a: Any, **_kw: Any) -> str:
         return path
 
-    monkeypatch.setattr(low_access_tools, "resolve_path", _resolve)
+    # INC-043-style split: ssh_mv lives in `low_access.fs_tools`; its
+    # `_prepare_existing` helper lives in `low_access._helpers`. Both hold
+    # an alias of `resolve_path` -- patch both.
+    monkeypatch.setattr(fs_tools, "resolve_path", _resolve)
+    monkeypatch.setattr(low_access_helpers, "resolve_path", _resolve)
 
 
 # ---------------------------------------------------------------------------

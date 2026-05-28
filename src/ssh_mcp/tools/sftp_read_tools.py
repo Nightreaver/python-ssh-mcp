@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
+import os
 import re
+import secrets
 import shlex
 import stat as stat_module
 from datetime import UTC, datetime
@@ -22,6 +26,7 @@ from ..models.results import (
     StatResult,
 )
 from ..services.audit import audited
+from ..services.local_path_policy import LOCAL_STREAM_CHUNK_BYTES, resolve_local_path
 from ..services.output_sanitizer import scan as _scan_output
 from ..services.path_policy import resolve_path
 from ..services.text import as_str
@@ -29,6 +34,9 @@ from ..ssh.errors import SSHMCPError
 from ._context import pool_from, resolve_host, settings_from
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from ..config import Settings
     from ..models.policy import ResolvedHost
     from ..ssh.pool import ConnectionPool
 
@@ -129,16 +137,57 @@ async def ssh_sftp_stat(host: str, path: str, ctx: Context) -> StatResult:
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
 @audited(tier="read")
-async def ssh_sftp_download(host: str, path: str, ctx: Context) -> DownloadResult:
-    """Download a remote file. Size-capped; content is base64-encoded."""
+async def ssh_sftp_download(
+    host: str,
+    path: str,
+    ctx: Context,
+    local_path: str | None = None,
+) -> DownloadResult:
+    """Download a remote file.
+
+    Two delivery modes:
+
+    - default (no ``local_path``): the bytes round-trip through the MCP
+      JSON channel as base64 in ``content_base64``. Subject to
+      ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB); files larger than
+      the cap come back with ``truncated=True`` and an empty payload --
+      use ``local_path`` for those.
+    - ``local_path=<absolute MCP-host path>`` (v1.3.0): the MCP server
+      streams the remote file directly onto its OWN filesystem. The LLM
+      never sees the payload. Requires the operator to allowlist the
+      destination directory via ``SSH_LOCAL_TRANSFER_ROOTS``. Subject to
+      the larger ``SSH_LOCAL_TRANSFER_MAX_BYTES`` cap (default 2 GiB).
+      Response carries ``content_base64=""`` + ``truncated=False`` +
+      ``local_path_written=<canonical destination>``. The write is
+      atomic: bytes land in ``<local_path>.ssh-mcp-tmp.<rand>`` and are
+      ``os.replace``'d into place once the stream finishes -- a crash
+      mid-transfer leaves the tmp, never a partial final file.
+    """
     settings = settings_from(ctx)
+    # When `local_path` is set, validate the destination against the
+    # MCP-host allowlist BEFORE acquiring the SSH connection -- a
+    # policy-disabled call shouldn't pay for a remote handshake.
+    canonical_local: Path | None = None
+    if local_path is not None:
+        canonical_local = resolve_local_path(local_path, settings, mode="write")
+
     pool = pool_from(ctx)
     resolved = resolve_host(ctx, host)
     policy = resolved.policy
     conn = await pool.acquire(resolved)
     canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
-    cap = settings.SSH_UPLOAD_MAX_FILE_BYTES  # reuse the upload cap for downloads
 
+    if canonical_local is not None:
+        return await _sftp_download_to_local(
+            pool=pool,
+            resolved=resolved,
+            policy_hostname=policy.hostname,
+            canonical=canonical,
+            canonical_local=canonical_local,
+            settings=settings,
+        )
+
+    cap = settings.SSH_UPLOAD_MAX_FILE_BYTES  # reuse the upload cap for downloads
     async with pool.sftp(resolved) as sftp:
         attrs = await sftp.stat(canonical)
         size = attrs.size or 0
@@ -174,6 +223,106 @@ async def ssh_sftp_download(host: str, path: str, ctx: Context) -> DownloadResul
         truncated=False,
         output_warnings=warnings,
     )
+
+
+async def _sftp_download_to_local(
+    *,
+    pool: ConnectionPool,
+    resolved: ResolvedHost,
+    policy_hostname: str,
+    canonical: str,
+    canonical_local: Path,
+    settings: Settings,
+) -> DownloadResult:
+    """Stream `<canonical>` from the remote SFTP server straight onto the
+    MCP host's filesystem at ``canonical_local``.
+
+    ``canonical_local`` is the already-policy-checked destination (from
+    :func:`resolve_local_path`); validation happens at the caller so the
+    allowlist check fails fast without acquiring an SSH connection.
+
+    Atomic via tmp+rename on the LOCAL side: bytes land in
+    ``<canonical_local>.ssh-mcp-tmp.<rand>`` and are ``os.replace``'d
+    into final position once the SFTP stream completes. ``os.replace``
+    is atomic on POSIX (rename within a filesystem) and on Windows for
+    same-volume moves; operators are expected to point their
+    allowlisted roots at sane filesystems.
+
+    Any exception mid-transfer triggers a best-effort unlink of the tmp
+    file so partial downloads never pollute the destination directory.
+    The size cap is enforced via ``sftp.stat`` BEFORE opening the local
+    tmp -- a too-large remote raises ``SftpDownloadError`` without
+    touching the local disk at all.
+    """
+    cap = settings.SSH_LOCAL_TRANSFER_MAX_BYTES
+
+    async with pool.sftp(resolved) as sftp:
+        attrs = await sftp.stat(canonical)
+        size = int(attrs.size or 0)
+        if size > cap:
+            raise SftpDownloadError(
+                f"remote file {canonical!r} is {size} bytes which exceeds "
+                f"SSH_LOCAL_TRANSFER_MAX_BYTES={cap}"
+            )
+
+        tmp_path = canonical_local.with_name(f"{canonical_local.name}.ssh-mcp-tmp.{secrets.token_hex(8)}")
+        bytes_written = 0
+        # Open the local tmp file outside the SFTP stream so a failure
+        # opening it (no perm, no space) surfaces BEFORE we start reading
+        # from the remote. ``"xb"`` (exclusive) fails if a colliding tmp
+        # already exists -- prevents a second concurrent download from
+        # clobbering ours.
+        try:
+            local_fh = await asyncio.to_thread(open, tmp_path, "xb")
+        except OSError as exc:
+            raise SftpDownloadError(f"could not open local tmp {tmp_path!s}: {exc}") from exc
+        local_fh_closed = False
+        try:
+            async with sftp.open(canonical, "rb") as remote_fh:
+                while True:
+                    chunk_raw = await remote_fh.read(LOCAL_STREAM_CHUNK_BYTES)
+                    if not chunk_raw:
+                        break
+                    chunk: bytes = (
+                        chunk_raw
+                        if isinstance(chunk_raw, bytes | bytearray)
+                        else chunk_raw.encode("utf-8", errors="replace")
+                    )
+                    await asyncio.to_thread(local_fh.write, chunk)
+                    bytes_written += len(chunk)
+            await asyncio.to_thread(local_fh.close)
+            local_fh_closed = True
+            await asyncio.to_thread(os.replace, tmp_path, canonical_local)
+        except BaseException:
+            # Cleanup tmp on ANY failure (including cancellation). Use a
+            # best-effort unlink so a missing tmp (already cleaned up by
+            # the OS or by a sibling thread) doesn't mask the original
+            # error.
+            if not local_fh_closed:
+                with contextlib.suppress(OSError):
+                    await asyncio.to_thread(local_fh.close)
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(os.unlink, tmp_path)
+            raise
+
+    return DownloadResult(
+        host=policy_hostname,
+        path=canonical,
+        size=bytes_written,
+        content_base64="",
+        truncated=False,
+        local_path_written=str(canonical_local),
+    )
+
+
+class SftpDownloadError(SSHMCPError):
+    """``ssh_sftp_download`` failed before the bytes landed.
+
+    Cap-violation or local-FS error during the ``local_path`` mode --
+    raised in place of returning a half-populated DownloadResult so the
+    audit log records ``result=error`` and no partial file lingers on
+    disk.
+    """
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")

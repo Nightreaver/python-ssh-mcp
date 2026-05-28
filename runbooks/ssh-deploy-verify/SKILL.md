@@ -42,7 +42,9 @@ accept a deploy. In parallel:
 ## 2. Upload with backup
 
 Compute the local hash **before** the upload, so the comparison in step 3
-is against a value the remote can't tamper with:
+is against a value the remote can't tamper with.
+
+**For artifacts under ~5 MiB** (configs, scripts), pass the content directly:
 
 ```python
 import base64, hashlib
@@ -55,6 +57,25 @@ ssh_deploy(
     content_base64=base64.b64encode(blob).decode("ascii"),
     mode=0o644,
     backup=True,  # leaves <path>.bak-<UTC-iso8601> for rollback
+)
+```
+
+**For artifacts larger than ~5 MiB** (release tarballs, compiled binaries),
+use `local_path` mode to stream from the MCP host's disk without encoding
+the bytes into the tool-call argument. Requires `SSH_LOCAL_TRANSFER_ROOTS`
+to cover the staging directory:
+
+```python
+import hashlib, pathlib
+blob = pathlib.Path("/srv/releases/app-2.0.tar.gz").read_bytes()
+local_digest = hashlib.sha256(blob).hexdigest()
+
+ssh_deploy(
+    host="web01",
+    path="/opt/app/releases/app-2.0.tar.gz",
+    local_path="/srv/releases/app-2.0.tar.gz",
+    mode=0o644,
+    backup=True,
 )
 ```
 

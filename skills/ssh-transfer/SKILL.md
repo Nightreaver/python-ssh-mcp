@@ -105,7 +105,10 @@ ssh_transfer(
 
 - [`ssh_cp`](../ssh-cp/SKILL.md) -- single-host file copy (use this for
   same-host transfers).
-- [`ssh_upload`](../ssh-upload/SKILL.md) -- upload base64 content from
-  the calling client to a remote.
+- [`ssh_upload`](../ssh-upload/SKILL.md) -- upload content from the MCP
+  host to a remote; `local_path` mode streams from MCP-host disk without
+  base64 (the right choice when the file is already on the MCP host and
+  you only need it on one remote, as opposed to two remotes).
 - [`ssh_sftp_download`](../ssh-sftp-download/SKILL.md) -- download a
-  remote file to base64 content in the MCP response.
+  remote file; `local_path` mode writes it to the MCP host instead of
+  returning base64.

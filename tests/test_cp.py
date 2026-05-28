@@ -22,7 +22,8 @@ import pytest
 
 from ssh_mcp.config import Settings
 from ssh_mcp.models.policy import AuthPolicy, HostPolicy
-from ssh_mcp.tools import low_access_tools
+from ssh_mcp.tools.low_access import _helpers as low_access_helpers
+from ssh_mcp.tools.low_access import fs_tools
 from ssh_mcp.tools.low_access_tools import WriteError, ssh_cp
 
 
@@ -111,14 +112,21 @@ def _ctx(
 
 def _bypass_path_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Identity stubs for the path-policy resolvers; ssh_cp's flow is what
-    we're testing here, not the canonicalizer."""
+    we're testing here, not the canonicalizer.
 
-    async def _resolve(
-        _conn: Any, path: str, _policy_arg: Any, _settings: Any, *_a: Any, **_kw: Any
-    ) -> str:
+    INC-043-style split: ``ssh_cp`` body lives in ``low_access.fs_tools``;
+    its ``resolve_path`` binding is owned by THAT module, so monkeypatching
+    the facade re-export is a no-op. Patch the submodule directly.
+    """
+
+    async def _resolve(_conn: Any, path: str, _policy_arg: Any, _settings: Any, *_a: Any, **_kw: Any) -> str:
         return path
 
-    monkeypatch.setattr(low_access_tools, "resolve_path", _resolve)
+    # `_prepare_existing` lives in `_helpers`; `ssh_cp` body resolves `dst`
+    # via the `fs_tools` binding directly. Both modules hold their own
+    # alias of `resolve_path` -- patch both.
+    monkeypatch.setattr(fs_tools, "resolve_path", _resolve)
+    monkeypatch.setattr(low_access_helpers, "resolve_path", _resolve)
 
 
 # ---------------------------------------------------------------------------

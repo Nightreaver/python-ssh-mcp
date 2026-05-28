@@ -4,7 +4,7 @@ Tools are grouped by **tier** (which `ALLOW_*` flag they require) and within eac
 
 For a full per-tool runbook, follow the **skill** link on each entry — the SKILL.md files cover `When to call`, `When NOT to call`, examples, common failures, and related tools.
 
-- 70 tools total
+- 92 tools total
 - 10 tool groups: `host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`
 - 4 tiers: read (always on) · low-access · dangerous · sudo
 - See [README.md](README.md) for tier flags, host config, restricted paths, BM25 search, and `SSH_ENABLED_GROUPS` examples.
@@ -13,35 +13,37 @@ For a full per-tool runbook, follow the **skill** link on each entry — the SKI
 
 How many bytes each group adds to the `tools/list` response every MCP turn — so operators can decide what to trim via `SSH_ENABLED_GROUPS`. Measured by serializing each tool's wire schema (`name`, `description`, `inputSchema`, `annotations`) as it is sent to the client. Tokens are a bytes/4 heuristic — directional, not exact (JSON tokenises slightly denser on Claude / GPT-4-family).
 
+Regenerate via `uv run python .claude/scripts/catalog-size.py` (or `.venv/Scripts/python` on Windows if `uv` is blocked by a running server). Re-run after any change to a tool's signature, docstring, or tag — and at every sprint that adds, removes, or modifies tools.
+
 | Group | Tools | Bytes | ~Tokens | Avg / tool |
 |---|---:|---:|---:|---:|
-| `docker` | 26 | 15,337 | ~3,834 | 589 B |
-| `systemctl` | 8 | 4,501 | ~1,125 | 562 B |
-| `file-ops` | 9 | 4,062 | ~1,015 | 451 B |
-| `exec` | 3 | 3,189 | ~797 | **1,063 B** (densest — rich input schemas) |
-| `sftp-read` | 5 | 3,187 | ~796 | 637 B |
-| `host` | 6 | 2,275 | ~568 | 379 B |
+| `docker` | 26 | 19,176 | ~4,794 | 737 B |
+| `file-ops` | 11 | 10,898 | ~2,724 | 990 B |
+| `host` | 13 | 10,069 | ~2,517 | 774 B |
+| `systemctl` | 17 | 8,290 | ~2,072 | 487 B |
+| `pkg` | 9 | 4,479 | ~1,119 | 497 B |
+| `sftp-read` | 5 | 4,342 | ~1,085 | 868 B |
+| `exec` | 4 | 3,979 | ~994 | **994 B** (densest — rich input schemas) |
+| `sudo` | 2 | 1,584 | ~396 | 792 B |
 | `shell` | 4 | 1,377 | ~344 | 344 B |
-| `sudo` | 2 | 1,339 | ~334 | 669 B |
-| `session` | 2 | 324 | ~81 | 162 B |
-| `pkg` | 3 | ~1,800 | ~450 | 600 B |
-| **Total** | **68** | **~37,391** | **~9,347** | — |
+| `session` | 1 | 154 | ~38 | 154 B |
+| **Total** | **92** | **64,348** | **~16,087** | — |
 
 **Savings from common `SSH_ENABLED_GROUPS` trims:**
 
-- Drop `docker` only → ~5,063 tok (saves **43%** — biggest single win)
-- Drop `systemctl` only → ~7,772 tok (saves **12%**)
-- Drop both → ~3,938 tok (saves **55%**)
-- Keep only `host,sftp-read,docker` (observability + container triage) → ~5,200 tok (saves ~42%)
-- Keep only `host,session,systemctl` (systemd-triage persona) → ~1,774 tok (saves ~80%)
+- Drop `docker` only → ~11,293 tok (saves **~4,794 tok / 30%** — biggest single win)
+- Drop `systemctl` only → ~14,015 tok (saves **~2,072 tok / 13%**)
+- Drop both → ~9,221 tok (saves **~6,866 tok / 43%**)
+- Keep only `host,sftp-read,docker` (observability + container triage) → ~8,396 tok (saves **~7,691 tok / 48%**)
+- Keep only `host,session,systemctl` (systemd-triage persona) → ~4,627 tok (saves **~11,460 tok / 71%**)
 
 ## Contents
 
 - [Platform compatibility matrix](#platform-compatibility-matrix)
 - [How to read each entry](#how-to-read-each-entry)
-- [Read tier (always on)](#read-tier-always-on) — 36 tools
-- [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 18 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
-- [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 14 tools (`ALLOW_DANGEROUS_TOOLS=true`)
+- [Read tier (always on)](#read-tier-always-on) — 39 tools
+- [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 22 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
+- [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 29 tools (`ALLOW_DANGEROUS_TOOLS=true`)
 - [Sudo tier](#sudo-tier-allow_sudotrue) — 2 tools (`ALLOW_SUDO=true`)
 - [Cross-cutting safeguards](#cross-cutting-safeguards)
 
@@ -56,8 +58,9 @@ Tools tagged **POSIX-only** refuse Windows targets with `PlatformNotSupported` (
 | `session` | yes | yes | In-memory pool / session state |
 | `sftp-read` (list / stat / download) | yes | yes | SFTP protocol |
 | `sftp-read` (find) | yes | yes | POSIX uses `find`; Windows uses SFTP-walk |
-| `file-ops` (mkdir / delete / delete_folder / upload / edit / patch / deploy / mv) | yes | yes | SFTP-first |
+| `file-ops` (mkdir / delete / delete_folder / upload / edit / patch / deploy / mv / transfer) | yes | yes | SFTP-first |
 | `file-ops` (`ssh_cp`) | yes | **no** | Uses `cp -a` |
+| `file-ops` (`ssh_link`) | yes | partial | Symbolic + hard-`-L` via SFTP (cross-platform); hard-`-P` shells out to `ln -P` (POSIX-only) |
 | `exec` | yes | **no** | POSIX `sh` + pkill |
 | `sudo` | yes | **no** | No `sudo` |
 | `shell` (open / exec) | yes | **no** | Cwd sentinel relies on POSIX shell |
@@ -70,23 +73,24 @@ Tools tagged **POSIX-only** refuse Windows targets with `PlatformNotSupported` (
 
 ## Sections by group
 
-- [Read tier](#read-tier-always-on) — 36 tools, no flag needed
-  - [Host & connection](#host--connection-grouphost) (7)
-  - [Sessions](#sessions-groupsession) (2)
+- [Read tier](#read-tier-always-on) — 39 tools, no flag needed
+  - [Host & connection](#host--connection-grouphost) (10)
+  - [Sessions](#sessions-groupsession) (1)
   - [SFTP reads](#sftp-reads-groupsftp-read) (5)
-  - [Docker (read)](#docker-read-groupdocker) (9)
+  - [Docker (read)](#docker-read-groupdocker) (10)
   - [systemctl (read)](#systemctl-read-groupsystemctl) (8)
-  - [Package management (read)](#package-management-read-grouppkg) (3)
+  - [Package management (read)](#package-management-read-grouppkg) (4)
   - [Persistent shell (read)](#persistent-shell-read-groupshell) (1)
-  - [Alerts](#alerts-grouphost) (covered above)
-- [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 18 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
-  - [Host policy reload](#host-policy-reload-grouphost-low-access) (1)
-  - [File operations](#file-operations-groupfile-ops) (9)
+- [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 22 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
+  - [Host policy reload + notes](#host-policy-reload-grouphost-low-access) (3)
+  - [File operations](#file-operations-groupfile-ops) (11)
   - [Docker (lifecycle)](#docker-lifecycle-groupdocker) (7)
   - [Persistent shell (close)](#persistent-shell-close-groupshell) (1)
-- [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 14 tools (`ALLOW_DANGEROUS_TOOLS=true`)
-  - [Arbitrary execution](#arbitrary-execution-groupexec) (3)
+- [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 29 tools (`ALLOW_DANGEROUS_TOOLS=true`)
+  - [Arbitrary execution](#arbitrary-execution-groupexec) (4)
   - [Docker (mutating)](#docker-mutating-groupdocker) (9)
+  - [systemctl (mutating)](#systemctl-mutating-groupsystemctl) (9)
+  - [Package management (mutating)](#package-management-mutating-grouppkg) (5)
   - [Persistent shell (open + exec)](#persistent-shell-open--exec-groupshell) (2)
 - [Sudo tier](#sudo-tier-allow_sudotrue) — 2 tools (`ALLOW_SUDO=true`, also requires dangerous)
 - [Cross-cutting safeguards](#cross-cutting-safeguards)
@@ -174,7 +178,7 @@ All paths canonicalized via remote `realpath -m` and verified inside `path_allow
 
 - **`ssh_sftp_list`** — List a directory with offset/limit pagination. Returns `entries[]` + `has_more`. Inputs: `host`, `path`, `offset` (0), `limit` (200). [skill](skills/ssh-sftp-list/SKILL.md)
 - **`ssh_sftp_stat`** — File/dir metadata (kind, size, mode, mtime, owner, group, symlink target). Inputs: `host`, `path`. [skill](skills/ssh-sftp-stat/SKILL.md)
-- **`ssh_sftp_download`** — Download a remote file. Size-capped at `SSH_EDIT_MAX_FILE_BYTES`; content base64-encoded. Inputs: `host`, `path`. [skill](skills/ssh-sftp-download/SKILL.md)
+- **`ssh_sftp_download`** — Download a remote file. Default mode: base64-encoded content in the response, size-capped at `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB). `local_path` mode: streams to a path on the MCP host's filesystem (up to `SSH_LOCAL_TRANSFER_MAX_BYTES`, default 2 GiB; requires `SSH_LOCAL_TRANSFER_ROOTS`). Result includes `local_path_written` when `local_path` is used. Inputs: `host`, `path`, `local_path` (optional). [skill](skills/ssh-sftp-download/SKILL.md)
 - **`ssh_find`** — `find <path> -maxdepth N -type T -name PATTERN`. Pattern regex-validated, results capped at `SSH_FIND_MAX_RESULTS`. Inputs: `host`, `root`, `name_pattern`, `kind` (`file`/`dir`/`symlink`/`any`), `max_depth`. [skill](skills/ssh-find/SKILL.md)
 - **`ssh_file_hash`** — MD5 / SHA1 / SHA256 / SHA512 of a remote file. POSIX: `<algo>sum`. Windows: `Get-FileHash`. Returns lowercase hex digest + byte size. Use after `ssh_upload` / `ssh_deploy` / `ssh_docker_cp` to verify the transfer landed intact; MD5/SHA1 included for legacy checksums but NOT collision-resistant. Inputs: `host`, `path`, `algorithm` (default `sha256`). [skill](skills/ssh-file-hash/SKILL.md)
 
@@ -247,10 +251,10 @@ All write paths use atomic `tmp + posix_rename`. Source / destination paths are 
 - **`ssh_cp`** — Copy a file via `cp -a -- src dst` (fixed argv, no shell). Inputs: `host`, `src`, `dst`. [skill](skills/ssh-cp/SKILL.md)
 - **`ssh_mv`** — Move/rename a file. SFTP `posix_rename` first; falls back to `mv --` for cross-filesystem. Inputs: `host`, `src`, `dst`. [skill](skills/ssh-mv/SKILL.md)
 - **`ssh_link`** — Create a hard or symbolic link from `src` to `dst`. **Hard linking is O(1) — prefer over `ssh_cp` for big files on the same volume.** Three modes: (a) default `symbolic=False, follow_symlinks=True` (like `ln -L`) — pure SFTP `link()`, link points at src's resolved target if src is a symlink; (b) `symbolic=False, follow_symlinks=False` (like `ln -P --physical`) — hard link to the symlink itself; SFTP can't express this so it shells out to `ln -P -- <src> <dst>` (low-access tier; doesn't need `ln` allowlisted); (c) `symbolic=True` (like `ln -s`) — pure SFTP `symlink()`, src stored verbatim; `follow_symlinks` ignored per GNU `ln`. Both sides path-validated: dst canonicalized; hard-link-`-L` src canonicalized; hard-link-`-P` src parent-canonicalize + `lstat`; symbolic src validated as a path string (relative resolved against dst's parent, normalized via `posixpath.normpath`, then allowlist + restricted-paths check — dangling targets allowed, NUL bytes rejected). No `-f` (force) — use `ssh_delete` first to overwrite ([INC-056](INCIDENTS.md)). Inputs: `host`, `src`, `dst`, `symbolic` (False), `follow_symlinks` (True). [skill](skills/ssh-link/SKILL.md)
-- **`ssh_upload`** — Create or replace a file atomically (`<path>.ssh-mcp-tmp.<hex>` + `posix_rename`). **Use this instead of `ssh_exec_run` for `cat > path <<EOF` / `tee` / `echo > path` / `printf > path`** — atomic, path-policy-checked, audited. Pass exactly one of `content_text` (plain UTF-8; configs/scripts/code) or `content_base64` (binary-safe). Capped at `SSH_UPLOAD_MAX_FILE_BYTES`. Inputs: `host`, `path`, `content_text` (one-of), `content_base64` (one-of), `mode` (octal). [skill](skills/ssh-upload/SKILL.md)
+- **`ssh_upload`** — Create or replace a file atomically (`<path>.ssh-mcp-tmp.<hex>` + `posix_rename`). **Use this instead of `ssh_exec_run` for `cat > path <<EOF` / `tee` / `echo > path` / `printf > path`** — atomic, path-policy-checked, audited. Pass exactly one of `content_text` (plain UTF-8; configs/scripts/code), `content_base64` (binary-safe; capped at `SSH_UPLOAD_MAX_FILE_BYTES`, default 256 MiB), or `local_path` (stream from MCP-host disk; capped at `SSH_LOCAL_TRANSFER_MAX_BYTES`, default 2 GiB; requires `SSH_LOCAL_TRANSFER_ROOTS`). Use `local_path` for files larger than ~5 MiB to avoid base64 context overhead. Result includes `local_path_written` when `local_path` is used. Inputs: `host`, `path`, `content_text` (one-of), `content_base64` (one-of), `local_path` (one-of), `mode` (octal). [skill](skills/ssh-upload/SKILL.md)
 - **`ssh_edit`** — Structured edit: replace `old_string` with `new_string` atomically. `mode="single"` (default) errors on duplicate or missing match; `mode="all"` replaces every occurrence. Inputs: `host`, `path`, `old_string`, `new_string`, `mode`. [skill](skills/ssh-edit/SKILL.md)
 - **`ssh_patch`** — Apply a unified diff atomically. Rejects on context or removal mismatch (no fuzzy fallback). Inputs: `host`, `path`, `unified_diff`. [skill](skills/ssh-patch/SKILL.md)
-- **`ssh_deploy`** — `ssh_upload` + auto-backup. If `backup=True` and the file exists, `posix_rename` to `<path>.bak-<UTC-iso8601>` before writing. Same `content_text` / `content_base64` payload semantics as `ssh_upload`. Inputs: `host`, `path`, `content_text` (one-of), `content_base64` (one-of), `mode`, `backup` (True). [skill](skills/ssh-deploy/SKILL.md)
+- **`ssh_deploy`** — `ssh_upload` + auto-backup. If `backup=True` and the file exists, `posix_rename` to `<path>.bak-<UTC-iso8601>` before writing. Same three-way payload mutex as `ssh_upload`: `content_text`, `content_base64`, or `local_path`. Backup step runs before the new content is sourced from disk, regardless of payload mode. Inputs: `host`, `path`, `content_text` (one-of), `content_base64` (one-of), `local_path` (one-of), `mode`, `backup` (True). [skill](skills/ssh-deploy/SKILL.md)
 - **`ssh_transfer`** — Copy a file from one remote host to another by streaming SFTP through the MCP server. Neither host needs outbound SSH to the other -- works in firewalled inter-host topologies where direct A->B SSH is blocked ([INC-052](INCIDENTS.md)). Both endpoints route through `resolve_path` (canonicalize + allowlist + restricted-zones) independently. Atomic write on the dst (temp + `posix_rename`). Size capped at `SSH_UPLOAD_MAX_FILE_BYTES`. Same-host call rejected -- use `ssh_cp` instead. Throughput bottlenecks at the slower of (src→MCP) and (MCP→dst); for inter-host gigabit when A and B already trust each other, an `scp` via `ssh_exec_run` is faster. Cross-platform via SFTP. Inputs: `src_host`, `src_path`, `dst_host`, `dst_path`, `overwrite` (False). [skill](skills/ssh-transfer/SKILL.md)
 
 ## Docker (lifecycle) (`group:docker`)
@@ -305,6 +309,20 @@ Container exec, image pulls, container/image creation + removal, prune.
 - **`ssh_docker_compose_up`** — Bring up a compose project. Defaults to `-d` (detached). `build=True` rebuilds images first. Inputs: `host`, `compose_file`, `detached`, `build`, `timeout`. [skill](skills/ssh-docker-compose-up/SKILL.md)
 - **`ssh_docker_compose_down`** — Tear down a compose project. `volumes=True` also removes named volumes (**destructive — data loss**). Inputs: `host`, `compose_file`, `volumes` (False), `timeout`. [skill](skills/ssh-docker-compose-down/SKILL.md)
 - **`ssh_docker_compose_pull`** — Pull images for a compose project without starting services. Inputs: `host`, `compose_file`, `timeout`. [skill](skills/ssh-docker-compose-pull/SKILL.md)
+
+## systemctl (mutating) (`group:systemctl`)
+
+Lifecycle mutations on systemd units. **All require root** — use a sudoers-enabled SSH account (passwordless `systemctl`) or call via `ssh_sudo_exec` if you have the sudo tier. All carry `tags={"dangerous", "group:systemctl"}` and route through the same `_run_unit_action` helper that validates the unit name (POSIX-safe argv) and surfaces a `unit_hash` audit field. Non-zero exit codes are data, not raised. POSIX-only.
+
+- **`ssh_systemctl_start`** — `systemctl start <unit>`. Starts the unit if not running. Idempotent — already-active units exit 0. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-start/SKILL.md)
+- **`ssh_systemctl_stop`** — `systemctl stop <unit>`. Stops the unit. Idempotent — already-inactive units exit 0. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-stop/SKILL.md)
+- **`ssh_systemctl_restart`** — `systemctl restart <unit>`. Stop-then-start in one call; preferred over manual stop+start for atomicity. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-restart/SKILL.md)
+- **`ssh_systemctl_reload`** — `systemctl reload <unit>`. **Fails (non-zero exit) on units without `ExecReload=`** — use `ssh_systemctl_restart` for those. Use when the unit supports live config reload (nginx, systemd-journald, sshd). Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-reload/SKILL.md)
+- **`ssh_systemctl_enable`** — `systemctl enable <unit>`. Creates symlinks so the unit starts at boot. **Does NOT start the unit** — call `ssh_systemctl_start` separately if you want it running now. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-enable/SKILL.md)
+- **`ssh_systemctl_disable`** — `systemctl disable <unit>`. Removes the boot-time symlinks. **Does NOT stop the unit** — call `ssh_systemctl_stop` separately. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-disable/SKILL.md)
+- **`ssh_systemctl_mask`** — `systemctl mask <unit>`. Links the unit to `/dev/null` — nothing can start it (boot, dependency, manual `systemctl start`) until unmasked. Use to forcibly prevent an unwanted service from coming up. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-mask/SKILL.md)
+- **`ssh_systemctl_unmask`** — `systemctl unmask <unit>`. Reverses `ssh_systemctl_mask` — removes the `/dev/null` symlink so the unit can start again. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-unmask/SKILL.md)
+- **`ssh_systemctl_reset_failed`** — `systemctl reset-failed <unit>`. Clears the failed state of one unit (no all-failed mode in v1). Pair with `ssh_journalctl` to first capture what failed, then reset so monitoring stops alarming. Inputs: `host`, `unit`, `timeout` (optional). [skill](skills/ssh-systemctl-reset-failed/SKILL.md)
 
 ## Package management (mutating) (`group:pkg`)
 

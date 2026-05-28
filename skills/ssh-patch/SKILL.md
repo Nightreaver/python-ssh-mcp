@@ -75,5 +75,6 @@ ssh_patch(host="web01", path="/etc/app/config.yml", unified_diff=diff)
 ## Related
 
 - [`ssh_edit`](../ssh-edit/SKILL.md) -- single-string replacement; simpler when applicable.
-- [`ssh_upload`](../ssh-upload/SKILL.md) -- when re-writing the whole file is easier than patching.
+- [`ssh_upload`](../ssh-upload/SKILL.md) -- when re-writing the whole file is easier
+  than patching; use `local_path` mode for large replacement files (>~5 MiB).
 - [`ssh_sftp_download`](../ssh-sftp-download/SKILL.md) -- read current contents to regenerate the diff.

@@ -321,3 +321,22 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 **Decision:** Sprint 3 (v1.4.0) adds `_RESULT_MODEL_CONFIG = ConfigDict(extra="forbid")` to `models/systemctl.py` and applies it to all 9 systemctl result models (`SystemctlStatusResult`, `SystemctlIsActiveResult`, `SystemctlIsEnabledResult`, `SystemctlIsFailedResult`, `SystemctlListUnitsResult`, `SystemctlShowResult`, `SystemctlCatResult`, `JournalctlResult`, `SystemctlListUnitsEntry`). This mirrors the exact pattern used in `models/results.py` — one shared constant, applied to every model in the file.
 
 **Consequences:** Construction-site typos on systemctl result models now raise `ValidationError` at the call site rather than silently dropping the field. The deferred BACKLOG item is closed. All `models/*.py` result classes now uniformly use `extra="forbid"` — no per-model exceptions remain.
+
+---
+
+## ADR-0026 — `local_path` bypass for the base64 LLM-channel bottleneck
+
+**Status:** Accepted (2026-05-28)
+
+**Context:** The default upload/download channel encodes file bytes as base64 inside tool-call arguments. Around 24 MiB the LLM began defensively chunking files into many small atomic-rename uploads — effectively serializing a large transfer into dozens of tool calls, each carrying a fragment. This made the channel unusable for real file transfer of anything non-trivial in size. The same problem applies in reverse: downloading a large file returns a base64 blob that occupies a significant fraction of the context window.
+
+**Decision:** Add a `local_path` keyword-only parameter to `ssh_upload`, `ssh_deploy`, and `ssh_sftp_download`. When set, the bytestream is sourced from (or written to) the MCP host's own filesystem rather than encoded in the tool-call argument. Key design choices:
+
+1. **Explicit opt-in with no fallbacks.** `SSH_LOCAL_TRANSFER_ROOTS` must be non-empty for the mode to activate; empty list = disabled. No fallback to cwd, MCP roots, or `~/Downloads`.
+2. **Separate size cap.** `SSH_LOCAL_TRANSFER_MAX_BYTES` (default 2 GiB) governs the `local_path` code path exclusively. The existing `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB) still governs the base64 paths.
+3. **Independent from `SSH_PATH_ALLOWLIST`.** The new `services/local_path_policy.py` governs MCP-host-side paths; `SSH_PATH_ALLOWLIST` governs remote SSH targets. Both must be configured separately.
+4. **Three-way mutex.** `content_text`, `content_base64`, and `local_path` are mutually exclusive; exactly one must be set on upload, and `local_path` is optional on download.
+5. **Atomic writes on both ends.** Upload streams from disk in 256 KiB chunks into the existing tmp+rename flow. Download writes to `<local_path>.ssh-mcp-tmp.<rand>` then `os.replace`.
+6. **Symlink safety.** Read mode: strict-resolve (must exist + regular file). Write mode: strict-resolve of parent then canonical rebuild so symlinked parents are followed before the `is_relative_to` allowlist check.
+
+**Consequences:** Large artifact deploys and snapshot downloads no longer require the LLM to hold or generate multi-MB base64 strings. Operators must explicitly configure `SSH_LOCAL_TRANSFER_ROOTS` — the default is safe (disabled). The `local_path_written` field on `WriteResult` and `DownloadResult` provides an audit trail back to the source/destination path on the MCP host.

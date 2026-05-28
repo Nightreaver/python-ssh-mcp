@@ -322,13 +322,12 @@ investigating regardless.
 both the `.tar.gz` and the `.tar.gz.sha256` to the operator side, then
 verify locally before considering the snapshot "done".
 
-`ssh_sftp_download` takes only `(host, path)` and returns the file
-content as base64 in the tool response -- writing to disk is the
-caller's job. Two flows depending on size:
+`ssh_sftp_download` supports two delivery modes. For large snapshot
+bundles, the `local_path` mode is strongly preferred -- it streams
+directly to disk without encoding the bytes as base64 in the tool
+response.
 
 ### Small files (.sha256, anything under ~500 KB)
-
-The response fits in one tool call. Decode and write:
 
 ```python
 result = ssh_sftp_download(host="iruelg4",
@@ -336,15 +335,26 @@ result = ssh_sftp_download(host="iruelg4",
 # result["content_base64"] -> base64-decode -> write to local file
 ```
 
-For the trivially-small sha256 file, the easiest path is to read the
-returned base64, decode it inline, and `Write` the result to
-`snapshots/<dir>-SECRETS.tar.gz.sha256`.
+### Large bundles (tar.gz) -- preferred path with `local_path`
 
-### Large bundles (tar.gz over ~500 KB)
+If the operator has configured `SSH_LOCAL_TRANSFER_ROOTS` to include
+a local staging directory (e.g. `SSH_LOCAL_TRANSFER_ROOTS=/srv/snapshots`),
+stream directly to disk -- no base64, no token overhead, works up to 2 GiB:
 
-The full base64 response exceeds the LLM tool-result token cap, but
-the harness auto-saves the raw JSON response to a tool-results file
-on the operator machine. Use that file:
+```python
+result = ssh_sftp_download(
+    host="iruelg4",
+    path="/root/snapshots/<dir>-SECRETS.tar.gz",
+    local_path="/srv/snapshots/<dir>-SECRETS.tar.gz",
+)
+# result["local_path_written"] confirms the canonical destination path
+```
+
+### Large bundles without `local_path` configured
+
+Without `SSH_LOCAL_TRANSFER_ROOTS`, the full base64 response may exceed
+the LLM tool-result token cap. The harness auto-saves the raw JSON
+response to a tool-results file on the operator machine:
 
 ```bash
 # Find the saved response (path appears in the size-cap error message)

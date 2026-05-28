@@ -17,7 +17,7 @@ locally without shipping it to shared log infra.
 Operators wire the `ssh_mcp.audit` logger to their desired sink (file,
 Loki, Elasticsearch, etc.) in their own logging config.
 
-Cheatsheet rejection behavior (B1 sprint, v1.2.0):
+Cheatsheet rejection behavior (B1 sprint, v1.9.0):
 
 - When ``ssh_exec_run`` / ``_streaming`` / ``ssh_sudo_exec`` refuse a
   command via ``CommandIsCheatsheetMatch`` (default-on

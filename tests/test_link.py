@@ -11,6 +11,7 @@ Pinned contracts:
 - Existing dst raises (no force / overwrite).
 - POSIX-only (require_posix).
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar
@@ -21,7 +22,7 @@ import pytest
 
 from ssh_mcp.config import Settings
 from ssh_mcp.models.policy import AuthPolicy, HostPolicy
-from ssh_mcp.tools import low_access_tools
+from ssh_mcp.tools.low_access import link_tools
 from ssh_mcp.tools.low_access_tools import WriteError, ssh_link
 
 
@@ -134,12 +135,17 @@ def _ctx(
 def _bypass_path_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub canonicalize_and_check / check_not_restricted to identity --
     path policy has its own dedicated tests; here we exercise ssh_link's
-    flow choices, not the canonicalizer."""
+    flow choices, not the canonicalizer.
+
+    INC-043-style split: `ssh_link` body lives in `low_access.link_tools`;
+    patch the bindings on that submodule -- patching the facade is a no-op.
+    """
+
     async def _canon(_conn: Any, path: str, *_a: Any, **_kw: Any) -> str:
         return path
 
-    monkeypatch.setattr(low_access_tools, "canonicalize_and_check", _canon)
-    monkeypatch.setattr(low_access_tools, "check_not_restricted", lambda *_a, **_kw: None)
+    monkeypatch.setattr(link_tools, "canonicalize_and_check", _canon)
+    monkeypatch.setattr(link_tools, "check_not_restricted", lambda *_a, **_kw: None)
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +161,10 @@ async def test_default_uses_sftp_link(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx(sftp, run_calls=run_calls)
 
     out = await ssh_link(
-        host="web01", src="/opt/app/build-1234", dst="/opt/app/current", ctx=ctx,
+        host="web01",
+        src="/opt/app/build-1234",
+        dst="/opt/app/current",
+        ctx=ctx,
     )
     assert sftp.link_calls == [("/opt/app/build-1234", "/opt/app/current")]
     assert run_calls == []  # no shell fallback
@@ -220,7 +229,10 @@ async def test_p_mode_lstat_missing_raises_clean_error(
 
     with pytest.raises(ValueError, match="src does not exist"):
         await ssh_link(
-            host="web01", src="/etc/missing", dst="/opt/x", ctx=ctx,
+            host="web01",
+            src="/etc/missing",
+            dst="/opt/x",
+            ctx=ctx,
             follow_symlinks=False,
         )
 
@@ -238,7 +250,11 @@ async def test_p_mode_shell_failure_raises_writeerror(
 
     with pytest.raises(WriteError, match="ln -P failed.*exit 1.*failed to create"):
         await ssh_link(
-            host="web01", src="/a", dst="/b", ctx=ctx, follow_symlinks=False,
+            host="web01",
+            src="/a",
+            dst="/b",
+            ctx=ctx,
+            follow_symlinks=False,
         )
 
 
@@ -253,7 +269,10 @@ async def test_p_mode_rejects_directory_only_src(
 
     with pytest.raises(ValueError, match="must include a filename"):
         await ssh_link(
-            host="web01", src="/etc/", dst="/opt/x", ctx=ctx,
+            host="web01",
+            src="/etc/",
+            dst="/opt/x",
+            ctx=ctx,
             follow_symlinks=False,
         )
 
@@ -391,15 +410,15 @@ async def test_symbolic_target_outside_allowlist_raises() -> None:
     async def _canon(_conn: Any, path: str, *_a: Any, **_kw: Any) -> str:
         return path
 
-    import ssh_mcp.tools.low_access_tools as low_access_tools_mod
     monkeypatch_inline = pytest.MonkeyPatch()
-    monkeypatch_inline.setattr(low_access_tools_mod, "canonicalize_and_check", _canon)
+    # Patch the submodule binding (ssh_link's body lives in `link_tools`).
+    monkeypatch_inline.setattr(link_tools, "canonicalize_and_check", _canon)
     try:
         with pytest.raises(PathNotAllowed, match="outside the allowlist"):
             await ssh_link(
                 host="web01",
-                src="/etc/shadow",         # outside /opt/app
-                dst="/opt/app/leak",       # inside /opt/app
+                src="/etc/shadow",  # outside /opt/app
+                dst="/opt/app/leak",  # inside /opt/app
                 ctx=_Ctx(),
                 symbolic=True,
             )
@@ -462,9 +481,8 @@ async def test_symbolic_relative_target_resolved_against_dst_parent(
     async def _canon(_conn: Any, path: str, *_a: Any, **_kw: Any) -> str:
         return path
 
-    import ssh_mcp.tools.low_access_tools as low_access_tools_mod
     mp = pytest.MonkeyPatch()
-    mp.setattr(low_access_tools_mod, "canonicalize_and_check", _canon)
+    mp.setattr(link_tools, "canonicalize_and_check", _canon)
     try:
         # dst=/opt/app/current; target=../../etc/foo -> resolves to /etc/foo
         # which is OUTSIDE /opt/app -> PathNotAllowed.

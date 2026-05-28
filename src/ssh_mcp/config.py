@@ -148,6 +148,32 @@ class Settings(BaseSettings):
     SSH_RESTRICTED_PATHS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     SSH_COMMAND_ALLOWLIST: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
+    # Local-disk allowlist for the `local_path` upload/download mode (v1.3.0).
+    # When ``ssh_upload`` / ``ssh_deploy`` / ``ssh_sftp_download`` are called
+    # with ``local_path=...`` the MCP server reads/writes that file directly
+    # on its OWN filesystem instead of routing the bytestream through the
+    # MCP JSON channel as base64. The LLM never sees the payload.
+    #
+    # Empty list (the default) ⇒ ``local_path`` mode is fully DISABLED. Any
+    # call passing ``local_path=`` raises ``LocalPathPolicyError`` pointing at
+    # this setting. No "smart" fallbacks (no cwd, no MCP-roots, no
+    # ~/Downloads default) -- the operator must opt in explicitly.
+    #
+    # Each entry is an absolute path on the MCP host. The target file must
+    # resolve (symlinks followed) to a child of one of these roots. Paths
+    # are NOT validated at load time -- they may exist intermittently (mounted
+    # volumes, removable media) and we don't want a transiently-missing root
+    # to crash startup.
+    SSH_LOCAL_TRANSFER_ROOTS: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    # Size cap for the `local_path` code path ONLY. Default 2 GiB. The
+    # existing `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB) continues to apply to
+    # `content_text` / `content_base64` uploads and to the base64-encoded
+    # `ssh_sftp_download` response -- those still pass through the MCP
+    # JSON channel and want a stricter envelope. `local_path` bypasses
+    # that channel and can stream much larger files safely.
+    SSH_LOCAL_TRANSFER_MAX_BYTES: int = 2 << 30
+
     @field_validator("SSH_CONFIG_FILE", mode="before")
     @classmethod
     def _empty_path_to_none(cls, v: Any) -> Any:
@@ -169,6 +195,7 @@ class Settings(BaseSettings):
         "SSH_COMMAND_ALLOWLIST",
         "SSH_ENABLED_GROUPS",
         "SSH_BM25_ALWAYS_VISIBLE",
+        "SSH_LOCAL_TRANSFER_ROOTS",
         mode="before",
     )
     @classmethod
@@ -237,7 +264,7 @@ class Settings(BaseSettings):
     MCP_HTTP_PORT: int = 8000
 
     # --- Observability ---
-    VERSION: str = "1.2.0"
+    VERSION: str = "1.3.0"
     LOG_LEVEL: str = "INFO"
     OTEL_ENABLED: bool = True
 

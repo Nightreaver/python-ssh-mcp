@@ -343,7 +343,7 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 
 ---
 
-## ADR-0027 — Secret-redaction layer: separate tool + HMAC markers + three-list policy (v1.4.0)
+## ADR-0027 — Secret-redaction layer: separate tool + HMAC markers + three-list policy (v1.4.1)
 
 **Status:** Accepted (2026-05-30)
 
@@ -369,11 +369,11 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 
 ---
 
-## ADR-0028 -- Sudo-tier path-bearing tools + path-aware cheatsheet (v1.4.0)
+## ADR-0028 -- Sudo-tier path-bearing tools + path-aware cheatsheet (v1.4.1)
 
 **Status:** Accepted (2026-05-30)
 
-**Context:** After the v1.4.0 redact-policy layer landed, a gap remained on production-hardened hosts where the SSH service account has minimal rights. On those hosts the SFTP-layer path policy (allowlist + restricted_paths + restricted_globs + redact_paths_globs) was de facto unreachable for root-owned files: the only sudo path was `ssh_sudo_exec("cat /etc/...")` which takes a command string, not a path argument, and has no structural hook to apply per-path policy. A root-owned `.env` at `/docker/app/.env` could be read via `ssh_sudo_exec cat /docker/app/.env` while `ssh_sftp_download` on the same path would be blocked by `redact_bypass_policy=block`.
+**Context:** After the v1.4.1 redact-policy layer landed, a gap remained on production-hardened hosts where the SSH service account has minimal rights. On those hosts the SFTP-layer path policy (allowlist + restricted_paths + restricted_globs + redact_paths_globs) was de facto unreachable for root-owned files: the only sudo path was `ssh_sudo_exec("cat /etc/...")` which takes a command string, not a path argument, and has no structural hook to apply per-path policy. A root-owned `.env` at `/docker/app/.env` could be read via `ssh_sudo_exec cat /docker/app/.env` while `ssh_sftp_download` on the same path would be blocked by `redact_bypass_policy=block`.
 
 **Decision:** Ship five sudo-tier path-bearing tools that route through the same `resolve_path` / `resolve_path_for_redacted_read` policy chain as the SFTP-read tier. Key choices:
 
@@ -389,6 +389,6 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 
 6. **`SudoFileOpError` as the new exception class.** Path-policy failures (`PathNotAllowed`, `PathRestricted`, `RedactBypassBlocked`) continue to be raised upstream in `services/path_policy.py` before any sudo invocation. `SudoFileOpError` covers failures inside the sudo pipeline itself (sudo refused, cat/ls/stat failed, parse failure, cap exceeded). Callers see a clean two-class failure surface.
 
-**Consequences:** The `redact_paths_globs` policy boundary now extends to root-owned files on hardened hosts. Operators with `ALLOW_SUDO=true` and `redact_bypass_policy=block` get consistent behavior across ssh-user-readable and root-owned paths: `.env` files are refused by both `ssh_sftp_download` and `ssh_sudo_read`, and both redirect to the `*_redacted` variant. The cheatsheet catches the most common `sudo cat .env` shapes and surfaces the redirect before any sudo invocation. Residual bypass surface via creative shell expressions is documented as INC-064 (unchanged from v1.4.0).
+**Consequences:** The `redact_paths_globs` policy boundary now extends to root-owned files on hardened hosts. Operators with `ALLOW_SUDO=true` and `redact_bypass_policy=block` get consistent behavior across ssh-user-readable and root-owned paths: `.env` files are refused by both `ssh_sftp_download` and `ssh_sudo_read`, and both redirect to the `*_redacted` variant. The cheatsheet catches the most common `sudo cat .env` shapes and surfaces the redirect before any sudo invocation. Residual bypass surface via creative shell expressions is documented as INC-064 (unchanged from v1.4.1).
 
 **References:** [services/sudo_file_ops.py](src/ssh_mcp/services/sudo_file_ops.py), [tools/sudo_tools.py](src/ssh_mcp/tools/sudo_tools.py), [services/exec_cheatsheet.py](src/ssh_mcp/services/exec_cheatsheet.py), [ssh/errors.py](src/ssh_mcp/ssh/errors.py), INC-064.

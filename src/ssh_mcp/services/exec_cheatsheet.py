@@ -137,7 +137,7 @@ _REDIRECT_RE = re.compile(r"(?<![&\d>])>(?!>)\s*(?P<target>\S+)")
 
 
 # ---------------------------------------------------------------------------
-# v1.4.0: read / list / sudo-prefix patterns.
+# v1.4.1: read / list / sudo-prefix patterns.
 #
 # Path-aware suggestion: when the path is unambiguously extractable, we
 # match it against ``redact_paths_globs`` and route to the ``_redacted``
@@ -478,7 +478,7 @@ def match_cheatsheet(
     commands return ``None`` (``check_command`` will reject them later as
     "command is empty").
 
-    ``policy`` + ``settings`` (v1.4.0) enable the path-aware suggestion
+    ``policy`` + ``settings`` (v1.4.1) enable the path-aware suggestion
     for single-file read patterns: when a path is unambiguously extractable
     from the command and it matches ``redact_paths_globs``, the suggestion
     routes to the ``_redacted`` variant. Omit both to keep the match
@@ -486,7 +486,7 @@ def match_cheatsheet(
     handy).
 
     Order of patterns:
-      1. Sudo-prefix variants (v1.4.0): sudo cat / head / tail / less /
+      1. Sudo-prefix variants (v1.4.1): sudo cat / head / tail / less /
          ... / tee / sh -c 'cat > ...' / vi / vim / nano / emacs / ed /
          ls. The inner shape decides the suggestion.
       2. Single-file read shapes: cat / head / tail / less / more /

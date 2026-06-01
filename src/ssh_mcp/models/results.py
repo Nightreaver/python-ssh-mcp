@@ -86,7 +86,7 @@ class StatResult(BaseModel):
     owner: str | None = None
     group: str | None = None
     symlink_target: str | None = None
-    # v1.4.0: populated when the redact-bypass layer flags the path in
+    # v1.4.1: populated when the redact-bypass layer flags the path in
     # ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -101,7 +101,7 @@ class WriteResult(BaseModel):
     -- the LLM never saw the payload but the operator should be able to
     correlate the destination back to its local source.
 
-    v1.4.0: ``output_warnings`` added so the secret-redaction bypass layer
+    v1.4.1: ``output_warnings`` added so the secret-redaction bypass layer
     can attach a per-call warning when ``redact_bypass_policy="warn"`` lets
     a redact-list path through. Same shape as ``ExecResult.output_warnings``
     and ``DownloadResult.output_warnings``.
@@ -306,7 +306,7 @@ class SftpListResult(BaseModel):
     offset: int
     limit: int
     has_more: bool
-    # v1.4.0: populated when the redact-bypass layer flags the path in
+    # v1.4.1: populated when the redact-bypass layer flags the path in
     # ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -318,7 +318,7 @@ class FindResult(BaseModel):
     root: str
     matches: list[str]
     truncated: bool
-    # v1.4.0: populated when the redact-bypass layer flags the search root
+    # v1.4.1: populated when the redact-bypass layer flags the search root
     # in ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -367,7 +367,7 @@ class HashResult(BaseModel):
     algorithm: str  # "md5" | "sha1" | "sha256" | "sha512"
     digest: str  # lowercase hex, no prefix
     size: int  # file size in bytes (-1 if unavailable)
-    # v1.4.0: populated when the redact-bypass layer flags the hashed path
+    # v1.4.1: populated when the redact-bypass layer flags the hashed path
     # in ``warn`` mode -- a SHA over a secret file is the same as the SHA
     # of the secret, so the warning helps the LLM know it just leaked an
     # identifying fingerprint of the cleartext.

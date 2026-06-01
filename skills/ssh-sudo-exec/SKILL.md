@@ -79,9 +79,9 @@ ssh_sudo_exec(host="web01", command="systemctl status nginx")
 - `exit_code=1` with "a password is required" -- passwordless sudoers isn't
   configured and no password source is reachable.
 
-## Cheatsheet patterns (v1.4.0+)
+## Cheatsheet patterns (v1.4.1+)
 
-`ssh_sudo_exec` also applies path-aware cheatsheet rejection from v1.4.0.
+`ssh_sudo_exec` also applies path-aware cheatsheet rejection from v1.4.1.
 The new sudo-prefix patterns match `sudo cat`, `sudo head`, `sudo tail`,
 `sudo ls`, `sudo tee`, `sudo vi/vim/nano/emacs/ed`, and `sudo sh -c 'cat > ...'`
 shapes and redirect to the dedicated sudo-tier path tools:

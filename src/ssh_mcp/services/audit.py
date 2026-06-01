@@ -38,7 +38,7 @@ Cheatsheet rejection behavior (B1 sprint, v1.9.0):
   so operators can grep ``jq 'select(.cheatsheet_pattern_id)'`` to
   count opt-out bypasses by pattern.
 
-Redact-bypass field (v1.4.0):
+Redact-bypass field (v1.4.1):
 
 - When a path-bearing tool resolves a path that matches the
   ``SSH_REDACT_PATHS_GLOBS`` set under ``warn`` or ``audit_only``

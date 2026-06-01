@@ -165,7 +165,12 @@ The `ssh_mcp.audit` logger emits **one JSON line per tool call** (all tiers — 
 }
 ```
 
-Paths and command bodies are reduced to a short SHA-256 prefix. **This supports aggregation/dedup, not privacy** — a common path or command is trivially rainbow-tableable. If your audit sink needs confidentiality, enforce it with transport encryption and access control on the log backend.
+Paths and command bodies are reduced to a short SHA-256 prefix. **This supports aggregation/dedup, not privacy** -- a common path or command is trivially rainbow-tableable. If your audit sink needs confidentiality, enforce it with transport encryption and access control on the log backend.
+
+Optional fields that may appear on a call line:
+
+- `cheatsheet_pattern_id` (string) -- present when the call matched a cheatsheet pattern (see `services/exec_cheatsheet.py`). Emitted whether or not the pattern blocked the call (`SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS` toggles enforcement).
+- `redact_bypass` (bool, v1.4.1+) -- present and `true` when a path-bearing tool delivered raw content from a path that matched `redact_paths_globs` under `redact_bypass_policy=warn` or `audit_only`. Omitted (not `false`) on normal calls so the line stays lean. Operator jq query for forensics: `jq 'select(.redact_bypass)'`. `block` mode raises before the tool body runs, so blocked attempts appear as `result=error` instead -- no separate `redact_bypass` field on the failure line.
 
 **The `error` field is the exception class name only** (e.g. `"PathNotAllowed"`, `"AuthenticationFailed"`). Full exception text — which can include remote stderr, sudo prompts, and file paths — stays on the same logger at DEBUG level, correlated by `correlation_id`. That way forensic context is available locally without leaking into whatever shared backend you ship audit to.
 
@@ -210,7 +215,7 @@ opentelemetry-instrument uv run ssh-mcp
 ## Testing
 
 ```bash
-uv run pytest                 # 457 unit tests, ~3s
+uv run pytest                 # 1643 unit tests, ~5s
 uv run ruff check .
 uv run mypy
 ```

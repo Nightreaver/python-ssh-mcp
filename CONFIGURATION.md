@@ -122,7 +122,7 @@ Three independent env flags, all **default-deny**. These are the security gates 
 | *(always on)* | Read-only tools: probes, SFTP reads, `find` |
 | `ALLOW_LOW_ACCESS_TOOLS=true` | SFTP-mediated file mutation: `cp`, `mv`, `mkdir`, `delete`, `delete_folder`, `edit`, `patch`, `upload` |
 | `ALLOW_DANGEROUS_TOOLS=true` | Arbitrary command execution. See also `ALLOW_ANY_COMMAND` below. |
-| `ALLOW_SUDO=true` | Privileged execution (`sudo_exec`, `sudo_run_script`). Requires `ALLOW_DANGEROUS_TOOLS=true` too, since sudo tools carry both tags. |
+| `ALLOW_SUDO=true` | Privileged execution (`ssh_sudo_exec`, `ssh_sudo_run_script`) plus the five sudo-tier path-bearing tools added in v1.4.1: `ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`. Requires `ALLOW_DANGEROUS_TOOLS=true` too, since sudo tools carry both tags. |
 
 Pick the narrowest tier for each deployment. A "diagnostics assistant" should stay read-only. A "config management assistant" gets low-access but not exec. Full-power access stays behind a separate deployment or a human operator.
 
@@ -281,7 +281,7 @@ Independent from tiers. Every tool carries a `group:*` tag; the `SSH_ENABLED_GRO
 
 For a per-tool reference (descriptions, inputs, skill links) see [TOOLS.md](TOOLS.md).
 
-70 tools across 10 groups:
+99 tools across 10 groups:
 
 | Group | Count | Tools |
 |---|---|---|
@@ -572,3 +572,153 @@ to `sudo -n`.
 implemented**. The lifespan logs a WARNING and falls back to per-call. Scoped
 passwordless sudoers entries are the preferred alternative; revisit if repeated
 sudo prompts become a bottleneck.
+
+### Sudo-tier path-bearing tools (v1.4.1)
+
+Five tools run file operations under `sudo` while still routing through the
+full path-policy + redaction chain -- closing the gap where `ssh_sudo_exec("cat /opt/.env")`
+bypassed `redact_bypass_policy=block`:
+
+| Tool | What it does |
+| --- | --- |
+| `ssh_sudo_read` | `sudo cat` a file; size-capped; returns raw bytes (base64 or text) |
+| `ssh_sudo_read_redacted` | `sudo cat` then redact via the same engine as `ssh_read_redacted` |
+| `ssh_sudo_write` | Atomic `sudo` write via `mktemp` + `mv`; path policy enforced pre-write |
+| `ssh_sudo_edit` | In-memory old-string -> new-string edit under `sudo` (same semantics as `ssh_edit`) |
+| `ssh_sudo_sftp_list` | `sudo ls -la` on a directory; returns structured entries |
+
+All five carry `{dangerous, sudo, group:sudo}` tags -- visible only when both
+`ALLOW_DANGEROUS_TOOLS=true` and `ALLOW_SUDO=true`. Path allowlist, restricted
+paths, and glob-based redact policy all apply before any `sudo` command runs.
+
+INC-064 documents the residual gap: complex shell shapes like `ssh_exec_run "cat /opt/.env | grep KEY"` still bypass path policy -- mitigation is operator `command_allowlist` discipline.
+
+---
+
+## Secret-redaction policy (v1.4.1)
+
+The redaction layer lets operators mark certain paths and key-name patterns
+as sensitive. Tools that read files apply redaction rules before returning
+content to the LLM.
+
+### How it works
+
+Two complementary deny-side mechanisms:
+
+- **`SSH_REDACT_PATHS_GLOBS`** -- paths matching these globs are readable only
+  via `ssh_read_redacted` (or `ssh_sudo_read_redacted` under sudo). What happens
+  when a raw-read tool (`ssh_sftp_download`, `ssh_sftp_list`, etc.) touches a
+  matching path is controlled by `SSH_REDACT_BYPASS_POLICY`:
+  - `block` -- refuse with `RedactBypassBlocked`, point at `ssh_read_redacted`
+  - `warn` (default) -- deliver raw content with a warning in `output_warnings`
+  - `audit_only` -- deliver silently with a `redact_bypass: true` flag in the audit line
+
+- **`SSH_RESTRICTED_GLOBS`** -- paths matching these globs are hard-denied for
+  all path-bearing tools (no bypass path). Complements the prefix-based
+  `SSH_RESTRICTED_PATHS`.
+
+### Key-name redaction
+
+`ssh_read_redacted` scans file content line by line and redacts values where
+the key name matches the configured list. Built-in defaults cover common
+patterns: `PASSWORD`, `PASSWD`, `SECRET`, `TOKEN`, `KEY`, `PRIVATE`,
+`CREDENTIAL`, `API_KEY`, `APIKEY`, `DSN`, `AUTH`, `BEARER`, `COOKIE`,
+`SESSION`, `JWT`, `OAUTH`, `SSH_KEY`.
+
+```bash
+# Add extra key names to the built-in defaults
+SSH_REDACT_KEYS_ADD=MY_TOKEN,INTERNAL_SECRET
+
+# Or replace defaults entirely (use when a default like KEY is a false positive)
+SSH_REDACT_KEYS_REPLACE=PASSWORD,APIKEY,MY_TOKEN
+```
+
+`SSH_REDACT_KEYS_ADD` and `SSH_REDACT_KEYS_REPLACE` are mutually exclusive;
+setting both raises a validation error at startup.
+
+### Entropy detection
+
+`SSH_REDACT_ENTROPY_DETECTION=true` (the default) also redacts high-entropy
+strings outside `KEY=VALUE` shape: base64 sequences >= 20 chars, hex strings
+>= 32 chars, and all PEM blocks (unconditionally). Set to `false` if you want
+only key-name-based redaction.
+
+### Hash markers
+
+Redacted values become `<sha:abcdef123456 len:48>`. With `SSH_REDACT_SALT` set
+(recommended, >= 32 chars), the hash is HMAC-SHA256 -- deterministic across
+hosts so the LLM can confirm two redacted values are the same secret without
+seeing either one. Without a salt, plain SHA-256 is used (less safe against
+known-plaintext confirmation).
+
+```bash
+SSH_REDACT_SALT=<32-or-more-random-chars>
+```
+
+Optional hint leakage for human comparisons (capped at 4 chars each side to
+limit plaintext exposure):
+
+```bash
+SSH_REDACT_HINT_CHARS=2    # marker becomes <sha:abcdef len:48 hint:AB...XY>
+```
+
+### Minimal redaction example
+
+```bash
+# .env
+SSH_REDACT_PATHS_GLOBS=**/.env,**/secrets/*,**/private*
+SSH_RESTRICTED_GLOBS=**/etc/shadow,**/etc/sudoers
+SSH_REDACT_BYPASS_POLICY=block
+SSH_REDACT_SALT=change-me-to-32-or-more-random-chars
+```
+
+---
+
+## Local-disk streaming (v1.10.0)
+
+By default `ssh_upload`, `ssh_deploy`, and `ssh_sftp_download` route file
+payloads through the MCP JSON channel as base64. For files larger than a few
+megabytes this is impractical: the base64 blob must pass through the LLM
+context window.
+
+The `local_path` mode bypasses the channel entirely -- the MCP server reads
+or writes a file directly on its own filesystem. The LLM never sees the payload.
+
+### Enabling it
+
+Local-path mode is **disabled by default**. Enable by setting the allowlist:
+
+```bash
+# Comma-separated absolute paths on the MCP server's filesystem
+SSH_LOCAL_TRANSFER_ROOTS=/home/deploy/transfers,/mnt/artifacts
+```
+
+The target file must resolve (symlinks followed) to a child of one of these
+roots. Requests outside the roots are refused with `LocalPathPolicyError`.
+
+### Size cap
+
+A separate cap applies to the local-path code path only:
+
+```bash
+SSH_LOCAL_TRANSFER_MAX_BYTES=2147483648    # default 2 GiB
+```
+
+The existing `SSH_UPLOAD_MAX_FILE_BYTES` (default 256 MiB) continues to
+apply to `content_text` / `content_base64` payloads routed through the
+MCP channel.
+
+### Usage
+
+```python
+# Upload a file from the MCP server's disk to a remote host
+ssh_upload(host="web01", path="/opt/app/app.tar.gz",
+           local_path="/home/deploy/transfers/app.tar.gz")
+
+# Download a remote file to the MCP server's disk (no base64 in the response)
+ssh_sftp_download(host="db01", path="/var/backups/dump.sql.gz",
+                  local_path="/mnt/artifacts/dump.sql.gz")
+```
+
+When `local_path` is supplied, `content_base64` / `content_text` in the
+response is empty -- the content is on disk, not in the LLM context.

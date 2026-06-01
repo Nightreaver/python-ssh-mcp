@@ -18,8 +18,8 @@ Regenerate via `uv run python .claude/scripts/catalog-size.py` (or `.venv/Script
 | Group | Tools | Bytes | ~Tokens | Avg / tool |
 |---|---:|---:|---:|---:|
 | `docker` | 27 | 20,053 | ~5,013 | 743 B |
+| `host` | 13 | 11,032 | ~2,758 | 848 B |
 | `file-ops` | 11 | 10,898 | ~2,724 | 990 B |
-| `host` | 13 | 10,069 | ~2,517 | 774 B |
 | `systemctl` | 17 | 8,290 | ~2,072 | 487 B |
 | `sftp-read` | 6 | 7,737 | ~1,934 | 1,289 B |
 | `sudo` | 7 | 6,943 | ~1,735 | 992 B |
@@ -27,16 +27,16 @@ Regenerate via `uv run python .claude/scripts/catalog-size.py` (or `.venv/Script
 | `exec` | 4 | 3,979 | ~994 | **994 B** (densest -- rich input schemas) |
 | `shell` | 4 | 1,377 | ~344 | 344 B |
 | `session` | 1 | 154 | ~38 | 154 B |
-| **Total** | **99** | **73,979** | **~18,494** | — |
+| **Total** | **99** | **74,942** | **~18,735** | — |
 
 **Savings from common `SSH_ENABLED_GROUPS` trims:**
 
-- Drop `docker` only → ~13,481 tok (saves **~5,013 tok / 27%** -- biggest single win)
-- Drop `systemctl` only → ~16,422 tok (saves **~2,072 tok / 11%**)
-- Drop both → ~11,409 tok (saves **~7,085 tok / 38%**)
-- Keep only `host,sftp-read,docker` (observability + container triage) → ~10,199 tok (saves **~8,295 tok / 45%**)
-- Keep only `host,session,systemctl` (systemd-triage persona) → ~5,362 tok (saves **~13,132 tok / 71%**)
-- Drop `sudo` (no privileged ops needed) → ~16,759 tok (saves **~1,735 tok / 9%**)
+- Drop `docker` only → ~13,722 tok (saves **~5,013 tok / 26%** -- biggest single win)
+- Drop `systemctl` only → ~16,663 tok (saves **~2,072 tok / 11%**)
+- Drop both → ~11,649 tok (saves **~7,085 tok / 37%**)
+- Keep only `host,sftp-read,docker` (observability + container triage) → ~9,705 tok (saves **~9,030 tok / 48%**)
+- Keep only `host,session,systemctl` (systemd-triage persona) → ~4,869 tok (saves **~13,866 tok / 74%**)
+- Drop `sudo` (no privileged ops needed) → ~17,000 tok (saves **~1,735 tok / 9%**)
 
 ## Contents
 
@@ -361,7 +361,7 @@ command_allowlist = ["systemctl", "postgresql"]    # also applies to sudo_exec
 # Password: SSH_SUDO_PASSWORD_CMD=... / OS keyring / passwordless (see Sudo section in README)
 ```
 
-- **`ssh_sudo_exec`** — Run a command under `sudo -S -p '' --`. Allowlist-checked like `ssh_exec_run`. Password piped over stdin, never appears in argv. Path-aware cheatsheet (v1.4.0) intercepts `sudo cat`/`sudo ls`/`sudo tee`/`sudo vi` etc. and redirects to the dedicated path tools below. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-sudo-exec/SKILL.md)
+- **`ssh_sudo_exec`** — Run a command under `sudo -S -p '' --`. Allowlist-checked like `ssh_exec_run`. Password piped over stdin, never appears in argv. Path-aware cheatsheet (v1.4.1) intercepts `sudo cat`/`sudo ls`/`sudo tee`/`sudo vi` etc. and redirects to the dedicated path tools below. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-sudo-exec/SKILL.md)
 - **`ssh_sudo_run_script`** — Run a multi-line script under `sudo -S sh -s --`. Body on stdin after the password line; no allowlist check (same rationale as `ssh_exec_script`). Inputs: `host`, `script`, `timeout`. [skill](skills/ssh-sudo-run-script/SKILL.md)
 - **`ssh_sudo_read`** — Read a root-owned file via `sudo cat --`; returns base64 bytes (`DownloadResult`). Full policy chain: allowlist + restricted_paths/globs + redact_bypass_policy (fires before sudo). Use `ssh_sudo_read_redacted` when `redact_bypass_policy=block` applies. Cap: `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB). Inputs: `host`, `path`. [skill](skills/ssh-sudo-read/SKILL.md)
 - **`ssh_sudo_read_redacted`** — Sudo-elevated counterpart to `ssh_read_redacted`. Reads via `sudo cat`, runs the secret-redactor, returns `RedactedReadResult` with HMAC-SHA256 markers. Bypass-exempt (this IS the allowed alternative to `redact_bypass_policy=block`). Inputs: `host`, `path`, `format`. [skill](skills/ssh-sudo-read-redacted/SKILL.md)

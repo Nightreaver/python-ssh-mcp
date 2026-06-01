@@ -1,4 +1,4 @@
-"""ssh_read_redacted (v1.4.1) -- the operator-blessed way to read a
+"""ssh_read_redacted (v1.5.0) -- the operator-blessed way to read a
 redact-listed file.
 
 Covers:

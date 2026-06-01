@@ -343,7 +343,7 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 
 ---
 
-## ADR-0027 — Secret-redaction layer: separate tool + HMAC markers + three-list policy (v1.4.1)
+## ADR-0027 — Secret-redaction layer: separate tool + HMAC markers + three-list policy (v1.5.0)
 
 **Status:** Accepted (2026-05-30)
 
@@ -369,11 +369,11 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 
 ---
 
-## ADR-0028 -- Sudo-tier path-bearing tools + path-aware cheatsheet (v1.4.1)
+## ADR-0028 -- Sudo-tier path-bearing tools + path-aware cheatsheet (v1.5.0)
 
 **Status:** Accepted (2026-05-30)
 
-**Context:** After the v1.4.1 redact-policy layer landed, a gap remained on production-hardened hosts where the SSH service account has minimal rights. On those hosts the SFTP-layer path policy (allowlist + restricted_paths + restricted_globs + redact_paths_globs) was de facto unreachable for root-owned files: the only sudo path was `ssh_sudo_exec("cat /etc/...")` which takes a command string, not a path argument, and has no structural hook to apply per-path policy. A root-owned `.env` at `/docker/app/.env` could be read via `ssh_sudo_exec cat /docker/app/.env` while `ssh_sftp_download` on the same path would be blocked by `redact_bypass_policy=block`.
+**Context:** After the v1.5.0 redact-policy layer landed, a gap remained on production-hardened hosts where the SSH service account has minimal rights. On those hosts the SFTP-layer path policy (allowlist + restricted_paths + restricted_globs + redact_paths_globs) was de facto unreachable for root-owned files: the only sudo path was `ssh_sudo_exec("cat /etc/...")` which takes a command string, not a path argument, and has no structural hook to apply per-path policy. A root-owned `.env` at `/docker/app/.env` could be read via `ssh_sudo_exec cat /docker/app/.env` while `ssh_sftp_download` on the same path would be blocked by `redact_bypass_policy=block`.
 
 **Decision:** Ship five sudo-tier path-bearing tools that route through the same `resolve_path` / `resolve_path_for_redacted_read` policy chain as the SFTP-read tier. Key choices:
 
@@ -383,12 +383,44 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 
 3. **Path-aware cheatsheet hybrid.** When the command shape allows unambiguous single-path extraction (`cat <path>`, `head -n N <path>`, `ls <path>`), the rejection hint is path-aware: if the extracted path matches `redact_paths_globs`, the hint names the `_redacted` variant. When the shape is too complex to extract a path reliably (`awk`, `sed`, `grep`, `file`), a generic `read-ambiguous` pattern refuses with a broad redirect. The arms-race against creative shell shapes (`awk '{print}' .env`) is explicitly not pursued -- the spec accepts that residual surface.
 
-4. **`ssh_sudo_write(local_path=)` reads file into memory.** The `local_path` mode uses `resolve_local_path` from `services/local_path_policy.py` (same operator setup as `ssh_upload`'s `local_path` mode, `SSH_LOCAL_TRANSFER_ROOTS` required). The local file is read into MCP server memory, then piped via stdin into the sudo pipeline. This avoids the LLM having to generate large base64 payloads. True streaming (no in-memory buffer) is deferred to v1.14.
+4. **`ssh_sudo_write(local_path=)` reads file into memory.** The `local_path` mode uses `resolve_local_path` from `services/local_path_policy.py` (same operator setup as `ssh_upload`'s `local_path` mode, `SSH_LOCAL_TRANSFER_ROOTS` required). The local file is read into MCP server memory, then piped via stdin into the sudo pipeline. This avoids the LLM having to generate large base64 payloads. True streaming (no in-memory buffer) is deferred.
 
 5. **`ssh_sudo_edit` preserves both ownership AND mode.** Two `sudo stat` calls run before write-back: `stat -c '%U:%G'` for owner/group and `stat -c '%a'` for octal permission bits. A secrets file at `0o600` must not get widened to the write helper's `0o644` default. This is security-critical: the default is applied ONLY as a fallback when stat returns `None` (file vanished between read and write -- an edge case, not the normal path).
 
 6. **`SudoFileOpError` as the new exception class.** Path-policy failures (`PathNotAllowed`, `PathRestricted`, `RedactBypassBlocked`) continue to be raised upstream in `services/path_policy.py` before any sudo invocation. `SudoFileOpError` covers failures inside the sudo pipeline itself (sudo refused, cat/ls/stat failed, parse failure, cap exceeded). Callers see a clean two-class failure surface.
 
-**Consequences:** The `redact_paths_globs` policy boundary now extends to root-owned files on hardened hosts. Operators with `ALLOW_SUDO=true` and `redact_bypass_policy=block` get consistent behavior across ssh-user-readable and root-owned paths: `.env` files are refused by both `ssh_sftp_download` and `ssh_sudo_read`, and both redirect to the `*_redacted` variant. The cheatsheet catches the most common `sudo cat .env` shapes and surfaces the redirect before any sudo invocation. Residual bypass surface via creative shell expressions is documented as INC-064 (unchanged from v1.4.1).
+**Consequences:** The `redact_paths_globs` policy boundary now extends to root-owned files on hardened hosts. Operators with `ALLOW_SUDO=true` and `redact_bypass_policy=block` get consistent behavior across ssh-user-readable and root-owned paths: `.env` files are refused by both `ssh_sftp_download` and `ssh_sudo_read`, and both redirect to the `*_redacted` variant. The cheatsheet catches the most common `sudo cat .env` shapes and surfaces the redirect before any sudo invocation. Residual bypass surface via creative shell expressions is documented as INC-064 (unchanged from v1.5.0).
 
 **References:** [services/sudo_file_ops.py](src/ssh_mcp/services/sudo_file_ops.py), [tools/sudo_tools.py](src/ssh_mcp/tools/sudo_tools.py), [services/exec_cheatsheet.py](src/ssh_mcp/services/exec_cheatsheet.py), [ssh/errors.py](src/ssh_mcp/ssh/errors.py), INC-064.
+
+---
+
+## ADR-0029 -- Server-info as dual surface (resource primary + tool fallback)
+
+**Date:** 2026-06-01 / **Version:** 1.14.0 / **Status:** Accepted
+
+**Context.** Operators and LLMs occasionally need to know which MCP server version they are talking to -- for capability-discovery ("am I on v1.12+ so `ssh_read_redacted` is available?"), for debugging client-server mismatches, or for cross-fleet asset tracking. FastMCP already populates `serverInfo.version` in the MCP initialize handshake from the value we pass to `FastMCP(version=...)` in `app.py`, but no major MCP client surfaces `serverInfo` into the LLM context. The version is operator-visible only (in client debug panes); the LLM cannot see it.
+
+**Decision.** Expose server identity + capability surface via TWO MCP surfaces sharing one builder function:
+
+1. **MCP resource** `mcp://ssh-mcp/server-info` -- the PRIMARY discovery path. Resources are the semantically correct MCP shape for "what is this server" -- static-ish metadata, cache-friendly, doesn't cost a catalog slot per turn.
+
+2. **`ssh_server_info` tool** (read-tier, `group:host`) -- the FALLBACK for clients that do not expose `resources/list` to the LLM. Same payload shape as the resource body; pick whichever surface the client supports.
+
+Both call into one shared `_collect_server_info()` helper in `tools/server_info_tools.py` so the payloads stay in lockstep. Payload shape (`ServerInfoResult`):
+
+- `name` -- always `"ssh-mcp"`.
+- `version` -- the running server's SemVer.
+- `total_tools` -- post-Visibility count (what the LLM actually sees in `tools/list`).
+- `enabled_tiers` -- list of `read` / `low-access` / `dangerous` / `sudo` depending on the `ALLOW_*` flags.
+- `enabled_groups` -- the operator's `SSH_ENABLED_GROUPS` filter verbatim (empty list = no filter = all visible).
+
+**Alternatives considered.**
+
+- *Just the resource, no tool.* Cleaner architecturally but leaves the LLM blind on Claude Code / Claude Desktop / Cursor's current resource-handling story. Rejected because LLM-side capability discovery is the primary use-case.
+- *Just the tool, no resource.* Costs one catalog slot per turn for metadata that doesn't change. Rejected because the resource is free per turn on supporting clients.
+- *Piggy-back on `ssh_host_ping` or `ssh_host_list`.* Considered, but requires an arbitrary host alias to be configured even when the LLM only wants server metadata, and entangles host-level concerns with server-level metadata. Rejected.
+
+**Consequences.** One new read-tier tool (~150 B catalog cost per turn -- worth it for the LLM-reachable fallback) plus one new resource entry. The tool is intentionally NOT decorated with `@audited`: server-meta queries don't need a security signal, and noising the audit log with them buys nothing. Capability-discovery via `ssh_server_info` is equivalent to checking `tools/list` for a tool name; both are cheap, and the LLM picks whichever surface its client exposes. No new env vars, no security boundary shift.
+
+**References:** [tools/server_info_tools.py](src/ssh_mcp/tools/server_info_tools.py), [models/results.py::ServerInfoResult](src/ssh_mcp/models/results.py), [skills/ssh-server-info/SKILL.md](skills/ssh-server-info/SKILL.md), [app.py](src/ssh_mcp/app.py) (where the FastMCP `version=` field is set from `settings.VERSION`).

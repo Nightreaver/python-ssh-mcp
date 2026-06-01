@@ -99,32 +99,32 @@ class HostPolicy(BaseModel):
     # Operators who must reach these paths fall back to ssh_exec_run /
     # ssh_sudo_exec (subject to dangerous-tier gating).
     restricted_paths: list[str] = Field(default_factory=list)
-    # v1.4.1: glob-aware sibling to ``restricted_paths``. Matched via
+    # v1.5.0: glob-aware sibling to ``restricted_paths``. Matched via
     # ``pathlib.PurePosixPath.match`` (POSIX semantics). Unioned with the
     # prefix list on the deny side. Example: ``["**/.env", "**/secrets/*"]``.
     restricted_globs: list[str] = Field(default_factory=list)
-    # v1.4.1: paths matching any of these globs are READABLE via
+    # v1.5.0: paths matching any of these globs are READABLE via
     # ``ssh_read_redacted`` but trip the bypass-policy (block/warn/audit_only)
     # when other path-bearing tools touch them. NOT a deny list -- that's
     # ``restricted_paths`` / ``restricted_globs``. The two are independent:
     # a path that's in BOTH stays denied (restricted wins).
     redact_paths_globs: list[str] = Field(default_factory=list)
-    # v1.4.1: per-host augmentation of the redact key list. APPENDED to the
+    # v1.5.0: per-host augmentation of the redact key list. APPENDED to the
     # built-in defaults (see services/redact_policy._DEFAULT_REDACT_KEYS) and
     # to env-level SSH_REDACT_KEYS_ADD. Mutually exclusive with
     # ``redact_keys_replace`` at this scope -- combining them is a
     # ConfigError at load time.
     redact_keys_add: list[str] = Field(default_factory=list)
-    # v1.4.1: per-host REPLACEMENT of the redact key list. When set, REPLACES
+    # v1.5.0: per-host REPLACEMENT of the redact key list. When set, REPLACES
     # the built-in defaults entirely for this host. Mutually exclusive with
     # ``redact_keys_add`` at the per-host scope.
     redact_keys_replace: list[str] = Field(default_factory=list)
-    # v1.4.1: per-host override of SSH_REDACT_ENTROPY_DETECTION. None =>
+    # v1.5.0: per-host override of SSH_REDACT_ENTROPY_DETECTION. None =>
     # inherit the env-level value.
     redact_entropy_detection: bool | None = None
-    # v1.4.1: per-host override of SSH_REDACT_BYPASS_POLICY. None => inherit.
+    # v1.5.0: per-host override of SSH_REDACT_BYPASS_POLICY. None => inherit.
     redact_bypass_policy: Literal["block", "warn", "audit_only"] | None = None
-    # v1.4.1: per-host override of SSH_REDACT_HINT_CHARS. None => inherit.
+    # v1.5.0: per-host override of SSH_REDACT_HINT_CHARS. None => inherit.
     # When set, must be in [0, 4]; the redactor clamps defensively.
     redact_hint_chars: int | None = None
     command_allowlist: list[str] = Field(default_factory=list)

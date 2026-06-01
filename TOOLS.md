@@ -4,7 +4,7 @@ Tools are grouped by **tier** (which `ALLOW_*` flag they require) and within eac
 
 For a full per-tool runbook, follow the **skill** link on each entry — the SKILL.md files cover `When to call`, `When NOT to call`, examples, common failures, and related tools.
 
-- 99 tools total
+- 100 tools total
 - 10 tool groups: `host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`
 - 4 tiers: read (always on) · low-access · dangerous · sudo
 - See [README.md](README.md) for tier flags, host config, restricted paths, BM25 search, and `SSH_ENABLED_GROUPS` examples.
@@ -18,7 +18,7 @@ Regenerate via `uv run python .claude/scripts/catalog-size.py` (or `.venv/Script
 | Group | Tools | Bytes | ~Tokens | Avg / tool |
 |---|---:|---:|---:|---:|
 | `docker` | 27 | 20,053 | ~5,013 | 743 B |
-| `host` | 13 | 11,032 | ~2,758 | 848 B |
+| `host` | 14 | 11,640 | ~2,910 | 831 B |
 | `file-ops` | 11 | 10,898 | ~2,724 | 990 B |
 | `systemctl` | 17 | 8,290 | ~2,072 | 487 B |
 | `sftp-read` | 6 | 7,737 | ~1,934 | 1,289 B |
@@ -27,22 +27,22 @@ Regenerate via `uv run python .claude/scripts/catalog-size.py` (or `.venv/Script
 | `exec` | 4 | 3,979 | ~994 | **994 B** (densest -- rich input schemas) |
 | `shell` | 4 | 1,377 | ~344 | 344 B |
 | `session` | 1 | 154 | ~38 | 154 B |
-| **Total** | **99** | **74,942** | **~18,735** | — |
+| **Total** | **100** | **75,550** | **~18,887** | — |
 
 **Savings from common `SSH_ENABLED_GROUPS` trims:**
 
-- Drop `docker` only → ~13,722 tok (saves **~5,013 tok / 26%** -- biggest single win)
-- Drop `systemctl` only → ~16,663 tok (saves **~2,072 tok / 11%**)
-- Drop both → ~11,649 tok (saves **~7,085 tok / 37%**)
-- Keep only `host,sftp-read,docker` (observability + container triage) → ~9,705 tok (saves **~9,030 tok / 48%**)
-- Keep only `host,session,systemctl` (systemd-triage persona) → ~4,869 tok (saves **~13,866 tok / 74%**)
-- Drop `sudo` (no privileged ops needed) → ~17,000 tok (saves **~1,735 tok / 9%**)
+- Drop `docker` only → ~13,874 tok (saves **~5,013 tok / 27%** -- biggest single win)
+- Drop `systemctl` only → ~16,815 tok (saves **~2,072 tok / 11%**)
+- Drop both → ~11,802 tok (saves **~7,085 tok / 38%**)
+- Keep only `host,sftp-read,docker` (observability + container triage) → ~9,857 tok (saves **~9,030 tok / 48%**)
+- Keep only `host,session,systemctl` (systemd-triage persona) → ~5,020 tok (saves **~13,867 tok / 73%**)
+- Drop `sudo` (no privileged ops needed) → ~17,152 tok (saves **~1,735 tok / 9%**)
 
 ## Contents
 
 - [Platform compatibility matrix](#platform-compatibility-matrix)
 - [How to read each entry](#how-to-read-each-entry)
-- [Read tier (always on)](#read-tier-always-on) — 41 tools
+- [Read tier (always on)](#read-tier-always-on) — 42 tools
 - [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 22 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
 - [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 29 tools (`ALLOW_DANGEROUS_TOOLS=true`)
 - [Sudo tier](#sudo-tier-allow_sudotrue) — 7 tools (`ALLOW_SUDO=true`)
@@ -74,8 +74,8 @@ Tools tagged **POSIX-only** refuse Windows targets with `PlatformNotSupported` (
 
 ## Sections by group
 
-- [Read tier](#read-tier-always-on) — 41 tools, no flag needed
-  - [Host & connection](#host--connection-grouphost) (10)
+- [Read tier](#read-tier-always-on) — 42 tools, no flag needed
+  - [Host & connection](#host--connection-grouphost) (11)
   - [Sessions](#sessions-groupsession) (1)
   - [SFTP reads](#sftp-reads-groupsftp-read) (6)
   - [Docker (read)](#docker-read-groupdocker) (11)
@@ -152,6 +152,7 @@ path_allowlist = ["/var/log", "/opt/app"]          # scope for sftp-read + find
 
 ## Host & connection (`group:host`)
 
+- **`ssh_server_info`** — Server identity (name + version) + capability surface (enabled tiers + `SSH_ENABLED_GROUPS` filter + post-Visibility tool count). No inputs. Companion to the `mcp://ssh-mcp/server-info` resource -- the resource is the primary discovery path; this tool is the fallback for clients that don't surface resources to the LLM (most current ones don't). Same payload shape on both surfaces. (v1.5.0) [skill](skills/ssh-server-info/SKILL.md)
 - **`ssh_host_ping`** — TCP + SSH handshake probe. Returns reachability, auth status, latency, server banner, and the pinned known_host fingerprint. **Auto-injects BOTH note layers**: `operator_notes` (hard-rule baseline from `hosts.toml`'s `notes` field, [INC-059](INCIDENTS.md)) when `SSH_PING_INCLUDES_NOTES=True` (default), AND `agent_notes` (the LLM's own session-spanning sidecar at `<SSH_HOST_NOTES_DIR>/<alias>.md`, [INC-060](INCIDENTS.md)) when `SSH_PING_INCLUDES_AGENT_NOTES=True` (default). Independent toggles per layer. Makes ping the canonical "starting work on this host" probe that surfaces full host memory into LLM context for free. Trade-off for agent layer: sidecars can grow to `SSH_HOST_NOTES_MAX_BYTES` (default 256 KiB); flip `SSH_PING_INCLUDES_AGENT_NOTES=false` if context inflation matters. Inputs: `host`. [skill](skills/ssh-host-ping/SKILL.md)
 - **`ssh_host_info`** — `uname -a`, `/etc/os-release`, `uptime`, `nproc`, `/proc/cpuinfo`, `hostname -f` parsed in parallel. Each probe runs independently (`return_exceptions=True`) so a missing one doesn't lose its siblings. Result includes `cpu_model`, `cpu_count`, `hostname_fqdn` ([INC-052](INCIDENTS.md)). Fixed argv, no shell interpolation. Inputs: `host`. [skill](skills/ssh-host-info/SKILL.md)
 - **`ssh_host_disk_usage`** — `df -PTh` parsed into structured entries. Inputs: `host`. [skill](skills/ssh-host-disk-usage/SKILL.md)
@@ -361,7 +362,7 @@ command_allowlist = ["systemctl", "postgresql"]    # also applies to sudo_exec
 # Password: SSH_SUDO_PASSWORD_CMD=... / OS keyring / passwordless (see Sudo section in README)
 ```
 
-- **`ssh_sudo_exec`** — Run a command under `sudo -S -p '' --`. Allowlist-checked like `ssh_exec_run`. Password piped over stdin, never appears in argv. Path-aware cheatsheet (v1.4.1) intercepts `sudo cat`/`sudo ls`/`sudo tee`/`sudo vi` etc. and redirects to the dedicated path tools below. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-sudo-exec/SKILL.md)
+- **`ssh_sudo_exec`** — Run a command under `sudo -S -p '' --`. Allowlist-checked like `ssh_exec_run`. Password piped over stdin, never appears in argv. Path-aware cheatsheet (v1.5.0) intercepts `sudo cat`/`sudo ls`/`sudo tee`/`sudo vi` etc. and redirects to the dedicated path tools below. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-sudo-exec/SKILL.md)
 - **`ssh_sudo_run_script`** — Run a multi-line script under `sudo -S sh -s --`. Body on stdin after the password line; no allowlist check (same rationale as `ssh_exec_script`). Inputs: `host`, `script`, `timeout`. [skill](skills/ssh-sudo-run-script/SKILL.md)
 - **`ssh_sudo_read`** — Read a root-owned file via `sudo cat --`; returns base64 bytes (`DownloadResult`). Full policy chain: allowlist + restricted_paths/globs + redact_bypass_policy (fires before sudo). Use `ssh_sudo_read_redacted` when `redact_bypass_policy=block` applies. Cap: `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB). Inputs: `host`, `path`. [skill](skills/ssh-sudo-read/SKILL.md)
 - **`ssh_sudo_read_redacted`** — Sudo-elevated counterpart to `ssh_read_redacted`. Reads via `sudo cat`, runs the secret-redactor, returns `RedactedReadResult` with HMAC-SHA256 markers. Bypass-exempt (this IS the allowed alternative to `redact_bypass_policy=block`). Inputs: `host`, `path`, `format`. [skill](skills/ssh-sudo-read-redacted/SKILL.md)

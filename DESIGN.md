@@ -156,9 +156,9 @@ src/ssh_mcp/
 │   ├── edit_service.py      # in-memory edit + patch apply
 │   ├── host_notes.py        # per-host agent-notes domain (sidecar mechanics, alias-regex defense in depth)
 │   ├── local_path_policy.py # v1.10.0: allowlist for local-disk transfer roots (SSH_LOCAL_TRANSFER_ROOTS)
-│   ├── redact_policy.py     # v1.4.1: key-list + glob-list + entropy-detection config
-│   ├── redactor.py          # v1.4.1: applies redaction rules to file content strings
-│   ├── sudo_file_ops.py     # v1.4.1: sudo-tier path-bearing ops (read/write/edit/list)
+│   ├── redact_policy.py     # v1.5.0: key-list + glob-list + entropy-detection config
+│   ├── redactor.py          # v1.5.0: applies redaction rules to file content strings
+│   ├── sudo_file_ops.py     # v1.5.0: sudo-tier path-bearing ops (read/write/edit/list)
 │   └── sudo_service.py
 ├── models/
 │   ├── results.py           # ExecResult, StatResult, ListResult, ...
@@ -542,15 +542,19 @@ Total: ~10 working days.
 
 ### Phase 6 (post-MVP) -- shipped milestones
 
-- **v1.10.0** -- Local-disk transfer mode. `ssh_upload`, `ssh_deploy`, `ssh_sftp_download`, and `ssh_sudo_write` gain an optional `local_path=` argument. The MCP server reads/writes a file directly on its own filesystem instead of routing the payload through the MCP JSON channel as base64. New service `services/local_path_policy.py` enforces an operator-configured allowlist (`SSH_LOCAL_TRANSFER_ROOTS`) and byte cap (`SSH_LOCAL_TRANSFER_MAX_BYTES`, default 2 GiB). Mode is fully disabled when the allowlist is empty (the default).
+- **v1.3.0** -- Local-disk transfer mode. `ssh_upload`, `ssh_deploy`, `ssh_sftp_download`, and `ssh_sudo_write` gain an optional `local_path=` argument. The MCP server reads/writes a file directly on its own filesystem instead of routing the payload through the MCP JSON channel as base64. New service `services/local_path_policy.py` enforces an operator-configured allowlist (`SSH_LOCAL_TRANSFER_ROOTS`) and byte cap (`SSH_LOCAL_TRANSFER_MAX_BYTES`, default 2 GiB). Mode is fully disabled when the allowlist is empty (the default).
 
-- **v1.11.0** -- `ssh_docker_system_df` read-tier tool. Reports disk consumption by images, containers, volumes, and build cache. Added to the `docker` group.
+- **v1.4.0** -- Secret-redaction policy (ADR-0027). New service stack: `services/redact_policy.py` (config: key lists, glob lists, bypass policy, salt, entropy detection) + `services/redactor.py` (line-level redaction engine). New tool `ssh_read_redacted` routes through path policy then applies redaction before returning content. Operator knobs: `SSH_REDACT_KEYS_ADD` / `SSH_REDACT_KEYS_REPLACE`, `SSH_REDACT_PATHS_GLOBS`, `SSH_RESTRICTED_GLOBS`, `SSH_REDACT_SALT`, `SSH_REDACT_ENTROPY_DETECTION`, `SSH_REDACT_BYPASS_POLICY`, `SSH_REDACT_HINT_CHARS`. Audit line gains optional `redact_bypass: true` field. HMAC-SHA256 hash markers allow cross-host secret identity comparison without leaking plaintext.
 
-- **v1.4.1** -- Secret-redaction policy (ADR-0027). New service stack: `services/redact_policy.py` (config: key lists, glob lists, bypass policy, salt, entropy detection) + `services/redactor.py` (line-level redaction engine). New tool `ssh_read_redacted` routes through path policy then applies redaction before returning content. Operator knobs: `SSH_REDACT_KEYS_ADD` / `SSH_REDACT_KEYS_REPLACE`, `SSH_REDACT_PATHS_GLOBS`, `SSH_RESTRICTED_GLOBS`, `SSH_REDACT_SALT`, `SSH_REDACT_ENTROPY_DETECTION`, `SSH_REDACT_BYPASS_POLICY`, `SSH_REDACT_HINT_CHARS`. Audit line gains optional `redact_bypass: true` field. HMAC-SHA256 hash markers allow cross-host secret identity comparison without leaking plaintext.
+- **v1.4.0** -- Sudo-tier path-bearing tools + path-aware cheatsheet (ADR-0028). Five new tools (`ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`) implemented via `services/sudo_file_ops.py`. Each routes through the same `resolve_path` / `resolve_path_for_redacted_read` policy chain as the SFTP-read tier, closing the gap where `ssh_sudo_exec("cat .env")` bypassed `redact_bypass_policy=block`. Path-aware cheatsheet extension: single-path `cat`, `head`, `ls` shapes resolve the path and redirect to the `*_redacted` variant when appropriate. INC-064 documents the residual raw-exec gap (complex shell shapes) as a known limitation.
 
-- **v1.4.1** -- Sudo-tier path-bearing tools + path-aware cheatsheet (ADR-0028). Five new tools (`ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`) implemented via `services/sudo_file_ops.py`. Each routes through the same `resolve_path` / `resolve_path_for_redacted_read` policy chain as the SFTP-read tier, closing the gap where `ssh_sudo_exec("cat .env")` bypassed `redact_bypass_policy=block`. Path-aware cheatsheet extension: single-path `cat`, `head`, `ls` shapes resolve the path and redirect to the `*_redacted` variant when appropriate. INC-064 documents the residual raw-exec gap (complex shell shapes) as a known limitation.
+- **v1.4.0** -- `ssh_docker_system_df` read-tier tool. Reports disk consumption by images, containers, volumes, and build cache. Added to the `docker` group.
 
-- **v1.4.1** -- CAS concurrent-writer safety for `ssh_host_notes_append` (INC-065). Pure optimistic CAS -- no lock. `SidecarSnapshot` captures `(text, mtime_ns, size)` at read time via `read_sidecar_with_snapshot`; `atomic_write_sidecar_if_unchanged` re-stats the file immediately before `os.replace` and returns `False` (no write) if `mtime_ns` or `size` changed since the snapshot. `ssh_host_notes_append` wraps the full build+write in a 5-iteration retry loop; each retry takes a fresh snapshot and rebuilds content against the newer existing text. After 5 contention failures it raises `RuntimeError` instead of spinning unbounded. `ssh_host_notes_set` is deliberately left last-writer-wins; a CAS variant with `expected_etag` is deferred to v1.14.
+- **v1.4.0** -- CAS concurrent-writer safety for `ssh_host_notes_append` (INC-065). Pure optimistic CAS -- no lock. `SidecarSnapshot` captures `(text, mtime_ns, size)` at read time via `read_sidecar_with_snapshot`; `atomic_write_sidecar_if_unchanged` re-stats the file immediately before `os.replace` and returns `False` (no write) if `mtime_ns` or `size` changed since the snapshot. `ssh_host_notes_append` wraps the full build+write in a 5-iteration retry loop; each retry takes a fresh snapshot and rebuilds content against the newer existing text. After 5 contention failures it raises `RuntimeError` instead of spinning unbounded. `ssh_host_notes_set` is deliberately left last-writer-wins; a CAS variant with `expected_etag` is deferred.
+
+- **v1.4.1** -- Documentation polish across public docs, source docstrings, and skill files. No behaviour changes.
+
+- **v1.5.0** -- `ssh_server_info` read-tier tool + `mcp://ssh-mcp/server-info` resource. Dual surface (resource as primary discovery path, tool as fallback for clients that don't expose resources to the LLM) sharing one payload shape (`name`, `version`, `total_tools`, `enabled_tiers`, `enabled_groups`). Lives in the `host` group. Not `@audited` -- server-meta, no host touch.
 
 ---
 

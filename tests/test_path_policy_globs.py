@@ -1,4 +1,4 @@
-"""services/path_policy -- restricted_globs (v1.4.1).
+"""services/path_policy -- restricted_globs (v1.5.0).
 
 Covers:
 

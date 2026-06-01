@@ -225,7 +225,7 @@ def check_redact_bypass(
     can stay uniform. ``warn`` tells the tool to attach a warning to
     its result. ``audit_only`` is the audit-decorator's signal.
 
-    Side-effect (v1.4.1 audit_only completion): when the resolved mode
+    Side-effect (v1.5.0 audit_only completion): when the resolved mode
     is ``warn`` or ``audit_only`` -- i.e. the call is about to deliver
     raw bytes from a redact-list path -- this flips a per-call ContextVar
     in ``services.audit`` so the ``@audited`` wrapper stamps

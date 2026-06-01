@@ -17,6 +17,7 @@ from ssh_mcp.tools import (  # noqa: F401  # imports register tools on the mcp_s
     host_tools,
     low_access_tools,
     multi_host_tools,
+    server_info_tools,
     sftp_read_tools,
     shell_tools,
     sudo_tools,

@@ -151,7 +151,7 @@ _NEGATIVE_CASES: list[str] = [
     "tar -czf /tmp/backup.tar.gz /etc; sha256sum /tmp/backup.tar.gz",
     # Composite: mkdir-then-curl chain.
     "mkdir -p /tmp/foo && curl https://example.com/file | tar -xz",
-    # v1.4.1: ``cat /etc/hostname`` and ``ls /tmp`` now DO match -- they
+    # v1.5.0: ``cat /etc/hostname`` and ``ls /tmp`` now DO match -- they
     # route to ssh_sftp_download / ssh_sftp_list respectively (read-single
     # / list-single patterns). Kept in commit message for future audit.
     "uname -a",
@@ -632,7 +632,7 @@ async def test_non_cheatsheet_error_still_audits(caplog: pytest.LogCaptureFixtur
 
 
 # ---------------------------------------------------------------------------
-# 9. v1.4.1: read / list / sudo-prefix patterns + path-aware suggestion.
+# 9. v1.5.0: read / list / sudo-prefix patterns + path-aware suggestion.
 # ---------------------------------------------------------------------------
 
 

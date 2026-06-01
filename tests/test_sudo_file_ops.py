@@ -1,4 +1,4 @@
-"""Pipeline-level tests for the v1.4.1 sudo file ops helpers.
+"""Pipeline-level tests for the v1.5.0 sudo file ops helpers.
 
 Covers (with mocked SSH conn):
 
@@ -163,7 +163,7 @@ async def test_sudo_atomic_write_happy_path_uses_stdin() -> None:
 
 @pytest.mark.asyncio
 async def test_sudo_atomic_write_inner_command_has_no_trailing_positional_args() -> None:
-    """Regression guard for the v1.4.1 cat>tmp parse bug.
+    """Regression guard for the v1.5.0 cat>tmp parse bug.
 
     Live-discovered on iruelg4: the original implementation appended
     ``_ <path> <mode> <owner>`` after the script body assuming

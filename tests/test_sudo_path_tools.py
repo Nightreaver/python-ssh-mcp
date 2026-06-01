@@ -1,4 +1,4 @@
-"""Tool-surface tests for the v1.4.1 sudo path-bearing tools.
+"""Tool-surface tests for the v1.5.0 sudo path-bearing tools.
 
 Combines ``ssh_sudo_read`` / ``ssh_sudo_read_redacted`` / ``ssh_sudo_write``
 / ``ssh_sudo_edit`` / ``ssh_sudo_sftp_list`` so the shared mocking
@@ -448,7 +448,7 @@ async def test_sudo_edit_happy_single(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_sudo_edit_preserves_restrictive_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression for v1.4.1: a secrets file at 0o600 must stay 0o600 after
+    """Regression for v1.5.0: a secrets file at 0o600 must stay 0o600 after
     edit. Before the fix, sudo_atomic_write was called with hardcoded 0o644
     so any restrictive-mode file got widened on every edit."""
 

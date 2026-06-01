@@ -664,7 +664,7 @@ async def _sftp_walk_find(
     return matches, False
 
 
-# ---- ssh_read_redacted (v1.4.1) ----
+# ---- ssh_read_redacted (v1.5.0) ----
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")

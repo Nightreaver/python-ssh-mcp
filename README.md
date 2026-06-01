@@ -3,12 +3,12 @@
 [![Python](https://img.shields.io/badge/python-3.11--3.13-blue)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/fastmcp-3.x-blue)](https://gofastmcp.com/)
 [![License](https://img.shields.io/badge/license-GPL--3-green)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1643%20passing-brightgreen)](CONFIGURATION.md#testing)
+[![Tests](https://img.shields.io/badge/tests-1649%20passing-brightgreen)](CONFIGURATION.md#testing)
 
 An SSH MCP server built in Python on top of FastMCP. The goal: give an LLM real SSH access to many hosts while keeping fine-grained control over what it can and can't do. The configuration surface is deliberately broad — probably overkill if you just want a single `ssh_exec` tool, but it pays off once you start connecting more than one host or locking the agent down to specific paths, commands, and visibility tiers. If a tool you need isn't here, open an issue.
 
 Currently implemented:
-99 tools across 10 groups, 1643 passing unit tests + 6 dockerized-sshd integration tests + an opt-in `tests/e2e/` suite that drives every tool against the operator's real `hosts.toml`. Strict `known_hosts` by default, path-allowlist confinement on every path-bearing tool, SHA-256-hashed audit log, operator-pluggable hooks. Secret-redaction policy that lets the LLM read config files without seeing the secrets (HMAC-SHA256 hash markers; redact_paths_globs with block/warn/audit_only bypass modes). Five sudo-tier path-bearing tools that respect path-policy under sudo (read/read_redacted/write/edit/sftp_list). Local-disk streaming mode on upload/deploy/download/sudo_write so large files bypass the LLM's base64 channel. Most tools return typed Pydantic results so MCP clients see real schemas in `tools/list` (not generic `object`); the few that legitimately produce merged or bimodal payloads stay as `dict[str, Any]` with the rationale documented at the function. POSIX SSH targets supported end-to-end; Windows SSH targets supported for SFTP + file-ops + `ssh_file_hash` via PowerShell `-EncodedCommand` (see [ADR-0023](DECISIONS.md)); Docker CLI swappable for Podman via `SSH_DOCKER_CMD` / per-host `docker_cmd`.
+100 tools across 10 groups, 1649 passing unit tests + 6 dockerized-sshd integration tests + an opt-in `tests/e2e/` suite that drives every tool against the operator's real `hosts.toml`. Strict `known_hosts` by default, path-allowlist confinement on every path-bearing tool, SHA-256-hashed audit log, operator-pluggable hooks. Secret-redaction policy that lets the LLM read config files without seeing the secrets (HMAC-SHA256 hash markers; redact_paths_globs with block/warn/audit_only bypass modes). Five sudo-tier path-bearing tools that respect path-policy under sudo (read/read_redacted/write/edit/sftp_list). Local-disk streaming mode on upload/deploy/download/sudo_write so large files bypass the LLM's base64 channel. Most tools return typed Pydantic results so MCP clients see real schemas in `tools/list` (not generic `object`); the few that legitimately produce merged or bimodal payloads stay as `dict[str, Any]` with the rationale documented at the function. POSIX SSH targets supported end-to-end; Windows SSH targets supported for SFTP + file-ops + `ssh_file_hash` via PowerShell `-EncodedCommand` (see [ADR-0023](DECISIONS.md)); Docker CLI swappable for Podman via `SSH_DOCKER_CMD` / per-host `docker_cmd`.
 
 ## Contents
 
@@ -39,13 +39,14 @@ In this file:
 - **MCP-compliant server** exposing SSH over stdio (or HTTP if you prefer); transport speaks MCP directly, no shim.
 - **Four-tier access model** — `read` / `low-access` / `dangerous` / `sudo`. Each tier is toggled with its own env flag and enforced via FastMCP `Visibility` transforms. Default: read-only.
 - **Ten tool groups** orthogonal to tiers (`host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`). `SSH_ENABLED_GROUPS` trims the catalog to what a given assistant actually needs.
-- **99 tools**: see [TOOLS.md](TOOLS.md) for the complete per-tool reference. Highlights:
-  - Read-only probes (ping, host info, disk usage, processes, alerts, known-hosts verify, user info, host notes)
+- **100 tools**: see [TOOLS.md](TOOLS.md) for the complete per-tool reference. Highlights:
+  - Read-only probes (ping, host info, disk usage, processes, alerts, known-hosts verify, user info, host notes, server-info)
+  - **`mcp://ssh-mcp/server-info` resource + `ssh_server_info` fallback tool** -- server identity + capability surface so the LLM (or operator) can self-introspect "what version is this server / which tiers are unlocked / how many tools are visible" without grepping the catalog (v1.5.0)
   - SFTP reads (list, stat, download, find, file_hash) with remote-realpath confinement
-  - **`ssh_read_redacted`** — read configs (`.env`, `.yml`, ...) with secrets replaced inline by HMAC-SHA256 hash markers so the LLM gets structural info but never the plaintext (v1.4.1)
+  - **`ssh_read_redacted`** — read configs (`.env`, `.yml`, ...) with secrets replaced inline by HMAC-SHA256 hash markers so the LLM gets structural info but never the plaintext (v1.5.0)
   - Low-access file ops (cp, mv, mkdir, delete, delete_folder, edit, patch, upload, deploy, link, transfer) — SFTP-first, atomic writes. `upload`/`deploy`/`sftp_download` support `local_path=` to stream big files without base64 round-trips (v1.10.0)
   - Exec tier with per-call timeout, streaming variant, broadcast across hosts, and a default-on cheatsheet that catches `cat`/`tee`/`sudo cat`/... and reroutes to the right native tool
-  - Sudo tier — `ssh_sudo_exec` plus **five sudo-tier path-bearing tools** (`ssh_sudo_read`, `_read_redacted`, `_write`, `_edit`, `_sftp_list`) so root-owned files stay inside path-policy instead of bypassing via raw `sudo cat` (v1.4.1). Password piped via stdin, never argv; env passwords hard-rejected at startup
+  - Sudo tier — `ssh_sudo_exec` plus **five sudo-tier path-bearing tools** (`ssh_sudo_read`, `_read_redacted`, `_write`, `_edit`, `_sftp_list`) so root-owned files stay inside path-policy instead of bypassing via raw `sudo cat` (v1.5.0). Password piped via stdin, never argv; env passwords hard-rejected at startup
   - 27 Docker tools (ps, logs, inspect, stats, events, system_df, images, volumes, compose up/down/logs/..., container lifecycle, exec, run, prune)
   - 17 systemctl tools (read + lifecycle mutations) and 8 journalctl/list helpers
   - 9 APT/package tools — read (`apt_list`, `apt_search`, `apt_show`, `apt_show_holds`) + mutations (`apt_install`, `apt_upgrade`, `apt_remove`, `apt_autoremove`, `apt_mark`). Non-Debian hosts get a clean `PlatformNotSupported`

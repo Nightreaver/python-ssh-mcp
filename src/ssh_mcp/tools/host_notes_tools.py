@@ -102,7 +102,7 @@ async def ssh_host_notes_append(host: str, entry: str, ctx: Context) -> HostNote
     plain file on the operator's MCP host. Treat it as guidance for your
     future self, not as a database.
 
-    **Concurrent writers (v1.4.1, INC-065):** when two MCP server
+    **Concurrent writers (v1.5.0, INC-065):** when two MCP server
     processes both append to the same sidecar around the same time, the
     second writer used to silently clobber the first. This tool now uses
     optimistic CAS: capture (mtime, size) at read, re-stat before write,
@@ -196,7 +196,7 @@ async def ssh_host_notes_set(host: str, content: str, ctx: Context) -> HostNotes
     Same caveats as `ssh_host_notes_append` -- no secrets, this is plain
     text on the operator's MCP host.
 
-    **Concurrent writers (v1.4.1, INC-065):** unlike
+    **Concurrent writers (v1.5.0, INC-065):** unlike
     `ssh_host_notes_append`, `_set` is deliberately last-writer-wins.
     The caller already decided to replace the file wholesale; if a
     concurrent writer slipped an `_append` in between the caller's read

@@ -124,7 +124,7 @@ def check_not_restricted(
     restricted_globs: list[str] | None = None,
 ) -> None:
     """Raise ``PathRestricted`` if ``canonical`` is inside any restricted root
-    OR matches any glob in ``restricted_globs`` (v1.4.1).
+    OR matches any glob in ``restricted_globs`` (v1.5.0).
 
     Prefix semantics identical to ``check_in_allowlist`` (i.e. ``/mnt/shared``
     as a restricted root rejects ``/mnt/shared`` itself and ``/mnt/shared/**``).
@@ -541,7 +541,7 @@ async def resolve_path(
     per call. POSIX targets ignore it. Callers in SFTP-heavy paths
     (low_access_tools, sftp_read_tools, multi_host_tools) should pass it.
 
-    v1.4.1: also enforces ``restricted_globs`` (glob-aware deny list,
+    v1.5.0: also enforces ``restricted_globs`` (glob-aware deny list,
     unioned with ``restricted_paths``) and the ``redact_bypass_policy=block``
     case for ``redact_paths_globs``. The bypass-block raises
     :class:`RedactBypassBlocked` -- the LLM sees an error that names

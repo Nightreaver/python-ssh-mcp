@@ -133,7 +133,7 @@ def atomic_write_sidecar(path: Path, content: str) -> None:
         raise
 
 
-# --- optimistic CAS for concurrent-writer safety (INC-065, v1.4.1) -------
+# --- optimistic CAS for concurrent-writer safety (INC-065, v1.5.0) -------
 #
 # Two MCP server processes that both write to the same sidecar via
 # ``ssh_host_notes_append`` race: each reads the file, builds new content

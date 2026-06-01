@@ -286,7 +286,7 @@ async def test_append_creates_parent_dir(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ssh_host_notes_append: CAS concurrent-writer safety (INC-065, v1.4.1)
+# ssh_host_notes_append: CAS concurrent-writer safety (INC-065, v1.5.0)
 # ---------------------------------------------------------------------------
 
 

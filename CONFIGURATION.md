@@ -122,7 +122,7 @@ Three independent env flags, all **default-deny**. These are the security gates 
 | *(always on)* | Read-only tools: probes, SFTP reads, `find` |
 | `ALLOW_LOW_ACCESS_TOOLS=true` | SFTP-mediated file mutation: `cp`, `mv`, `mkdir`, `delete`, `delete_folder`, `edit`, `patch`, `upload` |
 | `ALLOW_DANGEROUS_TOOLS=true` | Arbitrary command execution. See also `ALLOW_ANY_COMMAND` below. |
-| `ALLOW_SUDO=true` | Privileged execution (`ssh_sudo_exec`, `ssh_sudo_run_script`) plus the five sudo-tier path-bearing tools added in v1.4.1: `ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`. Requires `ALLOW_DANGEROUS_TOOLS=true` too, since sudo tools carry both tags. |
+| `ALLOW_SUDO=true` | Privileged execution (`ssh_sudo_exec`, `ssh_sudo_run_script`) plus the five sudo-tier path-bearing tools added in v1.5.0: `ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`. Requires `ALLOW_DANGEROUS_TOOLS=true` too, since sudo tools carry both tags. |
 
 Pick the narrowest tier for each deployment. A "diagnostics assistant" should stay read-only. A "config management assistant" gets low-access but not exec. Full-power access stays behind a separate deployment or a human operator.
 
@@ -573,7 +573,7 @@ implemented**. The lifespan logs a WARNING and falls back to per-call. Scoped
 passwordless sudoers entries are the preferred alternative; revisit if repeated
 sudo prompts become a bottleneck.
 
-### Sudo-tier path-bearing tools (v1.4.1)
+### Sudo-tier path-bearing tools (v1.5.0)
 
 Five tools run file operations under `sudo` while still routing through the
 full path-policy + redaction chain -- closing the gap where `ssh_sudo_exec("cat /opt/.env")`
@@ -595,7 +595,7 @@ INC-064 documents the residual gap: complex shell shapes like `ssh_exec_run "cat
 
 ---
 
-## Secret-redaction policy (v1.4.1)
+## Secret-redaction policy (v1.5.0)
 
 The redaction layer lets operators mark certain paths and key-name patterns
 as sensitive. Tools that read files apply redaction rules before returning

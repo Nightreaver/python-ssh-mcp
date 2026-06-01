@@ -8,7 +8,7 @@ Password is resolved per call via ``fetch_sudo_password`` and piped on stdin.
 Command allowlist (``ALLOW_ANY_COMMAND`` opt-in or a populated
 ``command_allowlist``) applies the same way as the plain exec tier.
 
-v1.4.1 added five path-bearing sudo tools (``ssh_sudo_read``,
+v1.5.0 added five path-bearing sudo tools (``ssh_sudo_read``,
 ``ssh_sudo_read_redacted``, ``ssh_sudo_write``, ``ssh_sudo_edit``,
 ``ssh_sudo_sftp_list``) so the redact-policy boundary stays reachable on
 production-hardened hosts where the ssh-user has minimal rights and
@@ -155,7 +155,7 @@ async def ssh_sudo_run_script(
 
 
 # ---------------------------------------------------------------------------
-# v1.4.1: sudo-tier path-bearing tools. See the module docstring for the
+# v1.5.0: sudo-tier path-bearing tools. See the module docstring for the
 # motivating use-case (production-hardened hosts where ssh-user has minimal
 # rights). All five take a ``path`` argument and route through
 # ``resolve_path`` (full policy chain: allowlist + restricted_paths +

@@ -86,7 +86,7 @@ class StatResult(BaseModel):
     owner: str | None = None
     group: str | None = None
     symlink_target: str | None = None
-    # v1.4.1: populated when the redact-bypass layer flags the path in
+    # v1.5.0: populated when the redact-bypass layer flags the path in
     # ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -101,7 +101,7 @@ class WriteResult(BaseModel):
     -- the LLM never saw the payload but the operator should be able to
     correlate the destination back to its local source.
 
-    v1.4.1: ``output_warnings`` added so the secret-redaction bypass layer
+    v1.5.0: ``output_warnings`` added so the secret-redaction bypass layer
     can attach a per-call warning when ``redact_bypass_policy="warn"`` lets
     a redact-list path through. Same shape as ``ExecResult.output_warnings``
     and ``DownloadResult.output_warnings``.
@@ -306,7 +306,7 @@ class SftpListResult(BaseModel):
     offset: int
     limit: int
     has_more: bool
-    # v1.4.1: populated when the redact-bypass layer flags the path in
+    # v1.5.0: populated when the redact-bypass layer flags the path in
     # ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -318,7 +318,7 @@ class FindResult(BaseModel):
     root: str
     matches: list[str]
     truncated: bool
-    # v1.4.1: populated when the redact-bypass layer flags the search root
+    # v1.5.0: populated when the redact-bypass layer flags the search root
     # in ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -367,7 +367,7 @@ class HashResult(BaseModel):
     algorithm: str  # "md5" | "sha1" | "sha256" | "sha512"
     digest: str  # lowercase hex, no prefix
     size: int  # file size in bytes (-1 if unavailable)
-    # v1.4.1: populated when the redact-bypass layer flags the hashed path
+    # v1.5.0: populated when the redact-bypass layer flags the hashed path
     # in ``warn`` mode -- a SHA over a secret file is the same as the SHA
     # of the secret, so the warning helps the LLM know it just leaked an
     # identifying fingerprint of the cleartext.
@@ -560,3 +560,35 @@ class HostAlertsResult(BaseModel):
     # live alongside list-shaped disk_entries. Pydantic validates the
     # outer dict; the inner shape is whatever the evaluator emits.
     metrics: dict[str, float | list[dict[str, float | str]]] = {}
+
+
+class ServerInfoResult(BaseModel):
+    """Identity + capability surface of the running MCP server (v1.5.0+).
+
+    Returned by ``ssh_server_info`` (tool) AND by the
+    ``mcp://ssh-mcp/server-info`` resource -- same payload shape so the
+    LLM can consume whichever surface the client exposes. The resource is
+    the primary discovery path; the tool is the fallback for clients that
+    do not surface MCP resources to the model.
+
+    Operators use this for "which server am I talking to?". LLMs use it
+    for capability discovery -- "am I on v1.12+ so ``ssh_read_redacted``
+    is available?" -- though checking ``tools/list`` for the tool name is
+    equivalent and cheaper in catalog terms.
+    """
+
+    model_config = _RESULT_MODEL_CONFIG
+
+    name: str
+    version: str
+    # Post-Visibility count: the tools/list the LLM actually sees. Equal
+    # to the registered catalog when no tier or group filters apply.
+    total_tools: int
+    # Tiers the operator has unlocked. ``read`` is always included.
+    # ``low-access`` / ``dangerous`` / ``sudo`` appear when their
+    # respective ALLOW_* flag is True.
+    enabled_tiers: list[str]
+    # The configured ``SSH_ENABLED_GROUPS`` filter, or ``[]`` when empty
+    # (all groups visible -- the default). Operator-visible knob; not a
+    # post-filter derivation.
+    enabled_groups: list[str]

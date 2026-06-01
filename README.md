@@ -43,10 +43,10 @@ In this file:
   - Read-only probes (ping, host info, disk usage, processes, alerts, known-hosts verify, user info, host notes, server-info)
   - **`mcp://ssh-mcp/server-info` resource + `ssh_server_info` fallback tool** -- server identity + capability surface so the LLM (or operator) can self-introspect "what version is this server / which tiers are unlocked / how many tools are visible" without grepping the catalog (v1.5.0)
   - SFTP reads (list, stat, download, find, file_hash) with remote-realpath confinement
-  - **`ssh_read_redacted`** — read configs (`.env`, `.yml`, ...) with secrets replaced inline by HMAC-SHA256 hash markers so the LLM gets structural info but never the plaintext (v1.5.0)
-  - Low-access file ops (cp, mv, mkdir, delete, delete_folder, edit, patch, upload, deploy, link, transfer) — SFTP-first, atomic writes. `upload`/`deploy`/`sftp_download` support `local_path=` to stream big files without base64 round-trips (v1.10.0)
+  - **`ssh_read_redacted`** — read configs (`.env`, `.yml`, ...) with secrets replaced inline by HMAC-SHA256 hash markers so the LLM gets structural info but never the plaintext (v1.4.0)
+  - Low-access file ops (cp, mv, mkdir, delete, delete_folder, edit, patch, upload, deploy, link, transfer) — SFTP-first, atomic writes. `upload`/`deploy`/`sftp_download` support `local_path=` to stream big files without base64 round-trips (v1.3.0)
   - Exec tier with per-call timeout, streaming variant, broadcast across hosts, and a default-on cheatsheet that catches `cat`/`tee`/`sudo cat`/... and reroutes to the right native tool
-  - Sudo tier — `ssh_sudo_exec` plus **five sudo-tier path-bearing tools** (`ssh_sudo_read`, `_read_redacted`, `_write`, `_edit`, `_sftp_list`) so root-owned files stay inside path-policy instead of bypassing via raw `sudo cat` (v1.5.0). Password piped via stdin, never argv; env passwords hard-rejected at startup
+  - Sudo tier — `ssh_sudo_exec` plus **five sudo-tier path-bearing tools** (`ssh_sudo_read`, `_read_redacted`, `_write`, `_edit`, `_sftp_list`) so root-owned files stay inside path-policy instead of bypassing via raw `sudo cat` (v1.4.0). Password piped via stdin, never argv; env passwords hard-rejected at startup
   - 27 Docker tools (ps, logs, inspect, stats, events, system_df, images, volumes, compose up/down/logs/..., container lifecycle, exec, run, prune)
   - 17 systemctl tools (read + lifecycle mutations) and 8 journalctl/list helpers
   - 9 APT/package tools — read (`apt_list`, `apt_search`, `apt_show`, `apt_show_holds`) + mutations (`apt_install`, `apt_upgrade`, `apt_remove`, `apt_autoremove`, `apt_mark`). Non-Debian hosts get a clean `PlatformNotSupported`

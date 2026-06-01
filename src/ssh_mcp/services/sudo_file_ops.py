@@ -1,4 +1,4 @@
-"""Sudo-elevated file pipeline helpers (v1.5.0).
+"""Sudo-elevated file pipeline helpers (v1.4.0).
 
 The sudo-tier path-bearing tools (``ssh_sudo_read``, ``ssh_sudo_write``,
 ``ssh_sudo_edit``, ``ssh_sudo_sftp_list``, ``ssh_sudo_read_redacted``)

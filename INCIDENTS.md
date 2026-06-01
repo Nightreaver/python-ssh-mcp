@@ -45,8 +45,8 @@ Newest at the top.
 
 | ID | Legacy | Date | Severity | Status | Source | Title |
 |---|---|---|---|---|---|---|
-| INC-065 | — | 2026-05-30 | Medium | resolved (v1.5.0) | external-report | `ssh_host_notes_append` lost concurrent updates: two MCP server processes both appending to the same sidecar around the same time would silently clobber the earlier writer's entry. `atomic_write_sidecar` was atomic at the FS level (tmp+rename) but the read-then-build-then-write cycle had no logical CAS. Fix: optimistic CAS — capture `(mtime_ns, size)` snapshot at read, re-stat right before rename, abort + retry the whole loop if changed. Up to 5 retries; pathological contention raises `RuntimeError` instead of unbounded spin. `ssh_host_notes_set` remains deliberately last-writer-wins (CAS variant with `expected_etag` is a v1.14 candidate). |
-| INC-064 | — | 2026-05-30 | Low | open (by-design, partial mitigation v1.5.0) | internal-review | Raw-exec bypass of `redact_paths_globs`: `ssh_exec_run cat /opt/.env` delivers plaintext regardless of redact policy; `redact_bypass_policy=block` only gates path-bearing SFTP tools, not the exec tier. Documented limitation; mitigation is to not allowlist `cat`/`less`/`head`/`tail` in `command_allowlist`. See ADR-0027, ADR-0028. |
+| INC-065 | — | 2026-05-30 | Medium | resolved (v1.4.0) | external-report | `ssh_host_notes_append` lost concurrent updates: two MCP server processes both appending to the same sidecar around the same time would silently clobber the earlier writer's entry. `atomic_write_sidecar` was atomic at the FS level (tmp+rename) but the read-then-build-then-write cycle had no logical CAS. Fix: optimistic CAS — capture `(mtime_ns, size)` snapshot at read, re-stat right before rename, abort + retry the whole loop if changed. Up to 5 retries; pathological contention raises `RuntimeError` instead of unbounded spin. `ssh_host_notes_set` remains deliberately last-writer-wins (CAS variant with `expected_etag` is a v1.14 candidate). |
+| INC-064 | — | 2026-05-30 | Low | open (by-design, partial mitigation v1.4.0) | internal-review | Raw-exec bypass of `redact_paths_globs`: `ssh_exec_run cat /opt/.env` delivers plaintext regardless of redact policy; `redact_bypass_policy=block` only gates path-bearing SFTP tools, not the exec tier. Documented limitation; mitigation is to not allowlist `cat`/`less`/`head`/`tail` in `command_allowlist`. See ADR-0027, ADR-0028. |
 | INC-063 | — | 2026-05-26 | Medium | resolved | external-report | POSIX `_canonicalize_posix` failed under chrooted SFTP (DSM 7.x): shell `realpath` (run over SSH channel, real-FS view) ENOENTs on paths the LLM gets from SFTP discovery (chroot view). Fix: fall back to `sftp.realpath` when shell realpath fails — SFTP-backed tools now work on chroot hosts; shell-backed tools (`ssh_cp`, `ssh_delete_folder` rm fallback, `ssh_mv` cross-fs fallback) still fail with native shell errors and need the chroot disabled or `ssh_exec_run` |
 | INC-062 | — | 2026-05-22 | Low | resolved | internal-review | Exec-discipline cheatsheet: default-on rejection of `ssh_exec_run` / `_streaming` / `ssh_sudo_exec` commands matching a native MCP wrapper. `SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=false` (default) refuses with `CommandIsCheatsheetMatch`; `=true` runs but tags the audit line with `cheatsheet_pattern_id` for opt-out telemetry. Rejection audit-line suppressed (no host-side side-effect); hooks still fire so PRE/POST stay paired. Eval at `docs/evals/2026-05-22-exec-run-discipline.md` |
 | INC-061 | — | 2026-04-30 | Medium | resolved | code-review | Compose tools bypassed `restricted_paths` — `compose_file` only went through `canonicalize_and_check`, skipping `check_not_restricted`; all 5 call sites migrated to `resolve_path` in v1.2.0 |
@@ -114,9 +114,9 @@ Newest at the top.
 
 ## Detailed entries
 
-### INC-065 — `ssh_host_notes_append` lost concurrent updates (v1.5.0)
+### INC-065 — `ssh_host_notes_append` lost concurrent updates (v1.4.0)
 
-- **Date:** 2026-05-30 · **Severity:** Medium · **Status:** resolved in v1.5.0
+- **Date:** 2026-05-30 · **Severity:** Medium · **Status:** resolved in v1.4.0
 - **Source:** external-report (operator noticed: two agent sessions both appending to `notes/<host>.md`; one entry vanished without trace)
 - **Refs:** [services/host_notes.py](src/ssh_mcp/services/host_notes.py), [tools/host_notes_tools.py](src/ssh_mcp/tools/host_notes_tools.py), [tests/test_host_notes.py](tests/test_host_notes.py)
 
@@ -132,22 +132,22 @@ atomic_write_sidecar(sidecar, new_content)    # T1
 
 The race surfaces in practice when two operators / sessions run agents in parallel against the same fleet — both call `ssh_host_notes_append` for the same host within seconds of each other.
 
-**Fix (v1.5.0):** Optimistic compare-and-swap:
+**Fix (v1.4.0):** Optimistic compare-and-swap:
 
 1. `read_sidecar_with_snapshot(path) -> SidecarSnapshot` captures the file's `(mtime_ns, size)` alongside the text — `None`s when the file did not exist.
 2. `atomic_write_sidecar_if_unchanged(path, content, expected_mtime_ns, expected_size) -> bool` re-stats the file right before `os.replace`, refuses the write (returns False) if the version tag changed since the snapshot.
 3. `ssh_host_notes_append` wraps the build-and-write step in a 5-iteration retry loop. Each iteration takes a fresh snapshot, rebuilds the content against the newer existing text, attempts the CAS write. Concurrent writer beats us → loop again. Pathological contention (5 failures in a row) raises `RuntimeError` with a clear message instead of unbounded spin.
 
-**Trade-off / residual TOCTOU:** there is a microseconds-wide window between the final `stat()` check inside `atomic_write_sidecar_if_unchanged` and the `os.replace`. For our actual contention (a handful of agent sessions sharing a notes file) this is statistically negligible. High-contention scenarios need a real `fcntl.flock`; deliberately not added in v1.5.0 because lock-files have their own pathologies (stale locks on crash, Windows/POSIX divergence, less predictable failure modes than CAS retries).
+**Trade-off / residual TOCTOU:** there is a microseconds-wide window between the final `stat()` check inside `atomic_write_sidecar_if_unchanged` and the `os.replace`. For our actual contention (a handful of agent sessions sharing a notes file) this is statistically negligible. High-contention scenarios need a real `fcntl.flock`; deliberately not added in v1.4.0 because lock-files have their own pathologies (stale locks on crash, Windows/POSIX divergence, less predictable failure modes than CAS retries).
 
-**`ssh_host_notes_set` is NOT fixed in v1.5.0.** A whole-file replace from one caller is inherently "I want my version, regardless of intermediate appends". If the caller wants safety they must call `ssh_host_notes` immediately before and accept that other agents may still race. A CAS variant with explicit `expected_etag` is a v1.14 candidate.
+**`ssh_host_notes_set` is NOT fixed in v1.4.0.** A whole-file replace from one caller is inherently "I want my version, regardless of intermediate appends". If the caller wants safety they must call `ssh_host_notes` immediately before and accept that other agents may still race. A CAS variant with explicit `expected_etag` is a v1.14 candidate.
 
 **Tests:** `tests/test_host_notes.py` gained three new tests — `test_append_retries_on_concurrent_writer` simulates a stale snapshot scenario via monkeypatch and verifies BOTH entries survive (no silent clobber); `test_append_raises_when_concurrent_writers_exhaust_retries` pins the bounded-retry → RuntimeError contract; `test_append_first_attempt_succeeds_in_uncontended_case` is the sanity guard that uncontended calls don't waste retries.
 
 ### INC-064 — Raw-exec bypass of `redact_paths_globs` (known limitation, by-design)
 
 - **Date:** 2026-05-30 · **Severity:** Low · **Status:** open (by-design)
-- **Source:** internal-review (v1.5.0 redaction layer audit)
+- **Source:** internal-review (v1.4.0 redaction layer audit)
 - **Refs:** [services/redact_policy.py](src/ssh_mcp/services/redact_policy.py), [tools/sftp_read_tools.py:ssh_read_redacted](src/ssh_mcp/tools/sftp_read_tools.py), [DECISIONS.md ADR-0027](DECISIONS.md), [skills/ssh-read-redacted/SKILL.md](skills/ssh-read-redacted/SKILL.md)
 
 **Gap:** `redact_bypass_policy=block` (and the `warn` / `audit_only` modes) gates SFTP-layer path-bearing tools — `ssh_sftp_download`, `ssh_sftp_list`, `ssh_sftp_stat`, `ssh_find`, `ssh_file_hash`, and all low-access tools that call `resolve_path`. It does NOT gate exec-tier tools. An LLM (or caller) with `ALLOW_DANGEROUS_TOOLS=true` and `cat` (or `less` / `head` / `tail`) in `command_allowlist` can retrieve the raw plaintext of any file via `ssh_exec_run cat /opt/.env` regardless of the redact-paths-globs configuration. The exec tool takes a command string, not a path argument — there is no structural hook to apply path-level policy to the arguments of an arbitrary shell command.
@@ -166,7 +166,7 @@ Note on cheatsheet overlap (INC-062): `ssh_exec_run cat /opt/.env` is already re
 
 **Status:** open by-design. No code change is planned. Documented in SKILL.md and ADR-0027 so operators set expectations correctly.
 
-**v1.5.0 mitigation (partial, 2026-05-30):** Five sudo-tier path-bearing tools (`ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`) now route root-owned filesystem ops through `resolve_path` (full policy chain: allowlist + restricted_paths + restricted_globs + redact_bypass_policy). The cheatsheet recognizes `sudo cat / head / tail / less / more / view / xxd / od / strings / wc / tee / sh -c 'cat > ...' / vi / vim / nano / emacs / ed / ls` shapes and refuses them with the matching `ssh_sudo_*` tool name as the suggested alternative. The plain-exec cheatsheet adds path-aware suggestions: `cat /opt/app/.env` against a host with `redact_paths_globs=["**/.env"]` routes to `ssh_read_redacted` rather than the generic `ssh_sftp_download`. Residual bypass surface: creative shapes that take path filters or expressions (`awk '{print}' .env`, `sed -n 1p .env`) are caught by the `read-ambiguous` pattern and rejected with a generic redirect message, but the arms race against operator-creative shell shapes is explicitly not pursued -- the spec accepts that bound. See ADR-0028.
+**v1.4.0 mitigation (partial, 2026-05-30):** Five sudo-tier path-bearing tools (`ssh_sudo_read`, `ssh_sudo_read_redacted`, `ssh_sudo_write`, `ssh_sudo_edit`, `ssh_sudo_sftp_list`) now route root-owned filesystem ops through `resolve_path` (full policy chain: allowlist + restricted_paths + restricted_globs + redact_bypass_policy). The cheatsheet recognizes `sudo cat / head / tail / less / more / view / xxd / od / strings / wc / tee / sh -c 'cat > ...' / vi / vim / nano / emacs / ed / ls` shapes and refuses them with the matching `ssh_sudo_*` tool name as the suggested alternative. The plain-exec cheatsheet adds path-aware suggestions: `cat /opt/app/.env` against a host with `redact_paths_globs=["**/.env"]` routes to `ssh_read_redacted` rather than the generic `ssh_sftp_download`. Residual bypass surface: creative shapes that take path filters or expressions (`awk '{print}' .env`, `sed -n 1p .env`) are caught by the `read-ambiguous` pattern and rejected with a generic redirect message, but the arms race against operator-creative shell shapes is explicitly not pursued -- the spec accepts that bound. See ADR-0028.
 
 ### INC-063 — `_canonicalize_posix` failed under chrooted SFTP (view-mismatch with SSH session channel)
 

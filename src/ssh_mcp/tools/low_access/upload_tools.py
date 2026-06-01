@@ -1,7 +1,7 @@
 """Low-access write tools: ``ssh_upload`` + ``ssh_deploy``.
 
 Three payload sources behind a single tool surface: ``content_text``,
-``content_base64``, ``local_path`` (v1.10.0). Mutex + local-path policy
+``content_base64``, ``local_path`` (v1.3.0). Mutex + local-path policy
 enforcement live in :func:`_resolve_upload_payload` and run BEFORE any
 SSH connection is acquired.
 """
@@ -71,7 +71,7 @@ async def ssh_upload(
       (tarballs, images, compiled artifacts) where invalid UTF-8 must
       round-trip cleanly. Subject to ``SSH_UPLOAD_MAX_FILE_BYTES``
       (default 256 MiB) since the payload crosses the MCP JSON channel.
-    - `local_path` (v1.10.0): absolute path on the MCP server's OWN
+    - `local_path` (v1.3.0): absolute path on the MCP server's OWN
       filesystem. The bytes are streamed from local disk directly into
       the SFTP write -- never round-tripping through the LLM as base64.
       Requires the operator to allowlist the source directory via
@@ -156,7 +156,7 @@ async def _resolve_upload_payload(
     deliberate valid input (write a zero-byte file), so we can't use
     truthiness.
 
-    Three-way mutex (v1.10.0): adding ``local_path`` made the previous
+    Three-way mutex (v1.3.0): adding ``local_path`` made the previous
     two-source check insufficient. We count the non-None sources rather
     than handle each pair, so a future fourth source slots in cleanly.
 

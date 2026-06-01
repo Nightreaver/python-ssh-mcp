@@ -60,15 +60,147 @@ dir) from in-place replacement.
 Atomic: temp file + `os.replace`. The sidecar is never observed
 half-written.
 
+## Canonical sidecar structure
+
+This tool is the **structural owner** of the sidecar file shape. The
+target layout below is operator scan-friendly: facts at the top,
+history at the bottom. Structured head sections are **agent-maintained
+via `_set` when content drifts**; the **Timeline is append-only** via
+[`ssh_host_notes_append`](../ssh-host-notes-append/SKILL.md).
+
+Most sections are **OPTIONAL** -- include the ones that have real
+content for this host, skip the others. The two non-negotiables are
+ordering (safety first, history last) and the append-only Timeline.
+
+```markdown
+# <alias> -- <one-line role / OS>
+# e.g. "orangepi3 -- Armbian 25.8 + Pi-hole DNS + Homepage container"
+# e.g. "james -- Synology DSM 7.3.2 NAS (172.20.31.26)"
+
+## !!! CRITICAL (read first)         <!-- OPTIONAL -->
+- 1-3 short bullets the LLM must see BEFORE doing anything else.
+- Use for hard rules where a mistake causes real damage:
+  data-loss-risk paths, single-point-of-failure services, sakrosankt
+  user data, "do not stop unannounced".
+
+## At-a-glance
+- **OS:** <distro + version + kernel + init>
+- **Hardware:** <CPU + cores + RAM + swap>
+- **Disks:** <mount -> device, size, FS, %used> (1-3 lines, only relevant)
+- **Network:** <primary IP/cidr + interface>
+- **SSH user:** <user> (<sudo: passwordless for X / per-call / none>)
+- **Role:** <one sentence: what this host does in the fleet>
+- **Last verified:** YYYY-MM-DDTHH:MMZ
+
+## Platform quirks (must-know)
+- 3-7 short bullets: facts about the system that would surprise the
+  next agent.
+- e.g. "/etc/os-release empty on DSM", "PATH excludes /usr/local/bin",
+  "busybox userland; use absolute paths".
+
+## Storage layout
+- one-liner per volume/mount: capacity, %used, type, convention.
+- Sub-bullets for share lists, docker-compose conventions, dual-mount
+  patterns. Cross-ref to other host notes when storage spans hosts.
+
+## Workloads (active)
+- systemd: nginx, postgres-16, ...
+- docker: N containers across M compose stacks (list stack names).
+- known broken: <service> (one-line + ref to Timeline date).
+
+## Access caveats                    <!-- OPTIONAL -->
+- Use when sudo / group membership / socket permissions aren't trivial.
+- e.g. "no docker group on DSM; /var/run/docker.sock is root:root 0660;
+  sudo only for /usr/bin/docker".
+
+## Cross-host dependencies           <!-- OPTIONAL -->
+- Use when this host serves another or depends on another.
+- e.g. "supplies DNS to 172.20.0.0/16 via Pi-hole",
+       "depends on james SMB share for /docker (CIFS, _netdev,nofail)".
+
+## Operational heuristics            <!-- OPTIONAL -->
+- Timing / behaviour expectations from past sessions. Distinct from
+  Platform quirks (those are facts about the system); these are how
+  operations on this system feel.
+- e.g. "first-start of a fresh container takes minutes (slow SD + CIFS)",
+       "docker pull 2-3 min for mid-size arm64 images -- timeout=600",
+       "DNS-hang during 00:00-00:30 log-flush window".
+
+## Open TODOs                        <!-- OPTIONAL -->
+- [ ] open item
+- [x] completed item -- left ticked as a record; sweep periodically via _set
+- (Keep the list short. Long-lived done items move to Timeline.)
+
+## DON'Ts                            <!-- OPTIONAL -->
+- Consolidated negative rules, smaller scope than CRITICAL above.
+- e.g. "don't edit /etc/cron.d/pihole -- pihole updater overwrites it",
+       "don't `docker pull` during 00:00-00:30 log-flush phase".
+
+## Known interventions               <!-- OPTIONAL -->
+- Permanent state changes operators or agents have made -- distinct
+  from Timeline observations because these affect future behaviour.
+- e.g. "2026-05-19 opkg install coreutils 9.7 (busybox realpath
+  doesn't support -e, broke path-policy)",
+       "2026-05-24 hosts.toml docker_cmd switched to 'sudo /usr/local/bin/docker'".
+
+## Timeline (append-only, oldest -> newest)
+### 2026-04-25T10:00:00Z -- short title
+learned: deploy@ in docker group, sudo not needed for docker commands.
+
+### 2026-04-25T11:30:00Z -- operator preference
+operator rejected `apt install apache2` here; nginx is the established
+solution.
+```
+
+**Why this shape:**
+
+- **Safety first.** `!!! CRITICAL` and `DON'Ts` are pulled to the top
+  precisely because the operator's worst fear is "the LLM missed the
+  warning and broke X". Putting them at the top maximises the chance
+  they ride into LLM context on every ping (`SSH_PING_INCLUDES_AGENT_NOTES`).
+- **Scan-friendly.** Operator can read top-to-bottom and get the host's
+  identity + gotchas + active workload status in ~30 seconds. Past
+  sessions' chronological trail lives at the bottom where it doesn't
+  slow that scan.
+- **Sections are optional.** A simple host might only have At-a-glance
+  + Platform quirks + Timeline. A complex one (DNS-SPoF Pi, NAS,
+  receiver with sakrosankt data) needs CRITICAL + Access caveats +
+  Cross-host deps + Operational heuristics + DON'Ts. Use what's load-bearing.
+- **Host-specific subsections welcome.** When a recurring theme
+  warrants its own section (orangepi3's "Cron-Spezifika" /
+  "armbian-ramlog" because cron drives the load curve here), break
+  it out under a `##`-level heading between Storage and Timeline.
+  The canonical names above are convention, not law.
+- **TODOs tick (`- [x]`) instead of being deleted** -- preserves the
+  audit trail. Sweep done items at the next `_set`; if the done item
+  was durable knowledge, summarise it into Timeline or one of the
+  fact-sections first.
+- **Timeline grows oldest -> newest** because `ssh_host_notes_append`
+  appends at the end. Operator reads top-of-Timeline for first-encounter
+  context, bottom-of-Timeline for most-recent state.
+
+### Distinguishing the three "negative rule" surfaces
+
+| Section | When to use | Severity |
+| --- | --- | --- |
+| `!!! CRITICAL` (top) | Mistake causes real damage (data loss, fleet-wide outage, irreversible change). Operator's "if you only read one thing..." | High; demands LLM attention before action |
+| `DON'Ts` (mid) | Don't-do-X advisories. Smaller blast radius, but still avoidable mistakes. | Medium; specific tactical patterns |
+| Platform quirks | Facts about how the system behaves (not a rule, just reality). | Informational |
+
+### Distinguishing operational from historical
+
+| Section | Content | Tense |
+| --- | --- | --- |
+| Platform quirks | Facts about the system | Present-tense, undated |
+| Operational heuristics | "How operations feel" -- timing, retry patterns, expected slowness | Present-tense, undated |
+| Known interventions | Permanent state changes made by operator/agents | Past-tense, dated, durable |
+| Timeline | Observations, decisions, lessons from one session | Past-tense, dated, append-only |
+
 ## Suggested consolidation pattern
 
-The end-state must conform to the **canonical sidecar structure**
-documented in
-[ssh_host_notes_append SKILL](../ssh-host-notes-append/SKILL.md) --
-At-a-glance / Platform quirks / Storage / Workloads / Open TODOs at the
-top, then the append-only Timeline at the bottom. The structured head
-is the part `_set` maintains; the Timeline preserves prior timestamped
-entries verbatim (you only prune stale ones).
+The end-state must conform to the canonical structure above. The
+structured head is the part `_set` maintains; the Timeline preserves
+prior timestamped entries verbatim (you only prune stale ones).
 
 ```text
 1. notes = ssh_host_notes(host="web01")

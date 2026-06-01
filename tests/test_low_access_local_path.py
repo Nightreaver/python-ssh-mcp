@@ -1,4 +1,4 @@
-"""ssh_upload / ssh_deploy `local_path` mode (v1.10.0).
+"""ssh_upload / ssh_deploy `local_path` mode (v1.3.0).
 
 Streams bytes from the MCP server's OWN filesystem into the SFTP write,
 bypassing the MCP JSON channel so the LLM never has to base64-encode the

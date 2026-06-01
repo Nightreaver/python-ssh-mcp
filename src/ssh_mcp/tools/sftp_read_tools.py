@@ -166,7 +166,7 @@ async def ssh_sftp_download(
       ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB); files larger than
       the cap come back with ``truncated=True`` and an empty payload --
       use ``local_path`` for those.
-    - ``local_path=<absolute MCP-host path>`` (v1.10.0): the MCP server
+    - ``local_path=<absolute MCP-host path>`` (v1.3.0): the MCP server
       streams the remote file directly onto its OWN filesystem. The LLM
       never sees the payload. Requires the operator to allowlist the
       destination directory via ``SSH_LOCAL_TRANSFER_ROOTS``. Subject to
@@ -664,7 +664,7 @@ async def _sftp_walk_find(
     return matches, False
 
 
-# ---- ssh_read_redacted (v1.5.0) ----
+# ---- ssh_read_redacted (v1.4.0) ----
 
 
 @mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")

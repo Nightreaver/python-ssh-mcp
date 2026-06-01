@@ -86,7 +86,7 @@ class StatResult(BaseModel):
     owner: str | None = None
     group: str | None = None
     symlink_target: str | None = None
-    # v1.5.0: populated when the redact-bypass layer flags the path in
+    # v1.4.0: populated when the redact-bypass layer flags the path in
     # ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -96,12 +96,12 @@ class WriteResult(BaseModel):
     ssh_mkdir / ssh_cp / ssh_mv / ssh_link / ssh_edit / ssh_patch / ...).
 
     ``local_path_written`` is populated only when ``ssh_upload`` / ``ssh_deploy``
-    sourced its bytes from ``local_path=`` (v1.10.0). It carries the
+    sourced its bytes from ``local_path=`` (v1.3.0). It carries the
     canonical MCP-host path the bytes were read from, for the audit trail
     -- the LLM never saw the payload but the operator should be able to
     correlate the destination back to its local source.
 
-    v1.5.0: ``output_warnings`` added so the secret-redaction bypass layer
+    v1.4.0: ``output_warnings`` added so the secret-redaction bypass layer
     can attach a per-call warning when ``redact_bypass_policy="warn"`` lets
     a redact-list path through. Same shape as ``ExecResult.output_warnings``
     and ``DownloadResult.output_warnings``.
@@ -306,7 +306,7 @@ class SftpListResult(BaseModel):
     offset: int
     limit: int
     has_more: bool
-    # v1.5.0: populated when the redact-bypass layer flags the path in
+    # v1.4.0: populated when the redact-bypass layer flags the path in
     # ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -318,7 +318,7 @@ class FindResult(BaseModel):
     root: str
     matches: list[str]
     truncated: bool
-    # v1.5.0: populated when the redact-bypass layer flags the search root
+    # v1.4.0: populated when the redact-bypass layer flags the search root
     # in ``warn`` mode. Empty in the common case.
     output_warnings: list[str] = []
 
@@ -332,7 +332,7 @@ class DownloadResult(BaseModel):
       channel as base64 in ``content_base64``. Subject to
       ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB); larger files come
       back with ``truncated=True`` and an empty payload.
-    - ``local_path=`` mode (v1.10.0): the MCP server streams the file
+    - ``local_path=`` mode (v1.3.0): the MCP server streams the file
       directly to disk at the caller-supplied local path.
       ``content_base64`` is empty, ``truncated`` is False, and
       ``local_path_written`` carries the canonical MCP-host path the
@@ -353,7 +353,7 @@ class DownloadResult(BaseModel):
     # text view should `sanitize()` after decoding. Empty for files
     # that look textually clean or aren't text at all.
     output_warnings: list[str] = []
-    # v1.10.0: populated only in `local_path` mode. Canonical MCP-host
+    # v1.3.0: populated only in `local_path` mode. Canonical MCP-host
     # absolute path the file was written to. None when the download went
     # back via the base64 channel.
     local_path_written: str | None = None
@@ -367,7 +367,7 @@ class HashResult(BaseModel):
     algorithm: str  # "md5" | "sha1" | "sha256" | "sha512"
     digest: str  # lowercase hex, no prefix
     size: int  # file size in bytes (-1 if unavailable)
-    # v1.5.0: populated when the redact-bypass layer flags the hashed path
+    # v1.4.0: populated when the redact-bypass layer flags the hashed path
     # in ``warn`` mode -- a SHA over a secret file is the same as the SHA
     # of the secret, so the warning helps the LLM know it just leaked an
     # identifying fingerprint of the cleartext.

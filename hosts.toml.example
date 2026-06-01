@@ -67,10 +67,10 @@ restricted_paths = []
 command_allowlist = []
 
 # ---------------------------------------------------------------------------
-# Secret-redaction policy (v1.5.0). Three independent path lists:
+# Secret-redaction policy (v1.4.0). Three independent path lists:
 #
 #   restricted_paths   -> hard-deny by prefix (existing, since v1.0)
-#   restricted_globs   -> hard-deny by glob (NEW v1.5.0)
+#   restricted_globs   -> hard-deny by glob (NEW v1.4.0)
 #   redact_paths_globs -> READABLE via ssh_read_redacted, but raw-content
 #                         tools (ssh_sftp_download, ssh_sftp_list, etc.)
 #                         trip the bypass-policy below.

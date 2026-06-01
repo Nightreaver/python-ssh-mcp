@@ -81,7 +81,7 @@ When the file did not exist and `chown_user`/`chown_group` were omitted:
 
 The `local_path` mode avoids forcing the LLM to generate or hold large base64
 payloads as a tool-call argument (the same motivation as `ssh_upload`'s
-`local_path` mode from v1.10.0). The file is read into memory on the MCP
+`local_path` mode from v1.3.0). The file is read into memory on the MCP
 server before the sudo pipeline starts; true streaming (no in-memory buffer)
 is deferred to a future release.
 

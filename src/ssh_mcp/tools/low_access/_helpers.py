@@ -105,7 +105,7 @@ async def _atomic_write_stream(
     """Stream `local_path` into a tmp sibling of `final_path` via SFTP,
     then atomically rename. Returns the byte count actually transferred.
 
-    Used by the v1.10.0 ``local_path`` upload mode. The whole file never
+    Used by the v1.3.0 ``local_path`` upload mode. The whole file never
     sits in RAM -- we read 256 KiB at a time from the local disk via a
     threadpool (open/read are blocking syscalls) and ship each chunk
     through the SFTP channel. asyncssh's window-based flow control

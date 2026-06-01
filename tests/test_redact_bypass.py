@@ -7,10 +7,10 @@ Covers:
   with the standard "use ssh_read_redacted" message.
 - ``warn`` mode delivers raw content + appends REDACT_BYPASS_WARNING to
   ``output_warnings`` AND records ``redact_bypass: true`` on the audit
-  line (v1.5.0).
+  line (v1.4.0).
 - ``audit_only`` mode delivers raw content silently to the LLM AND
   records ``redact_bypass: true`` on the audit line so operators can
-  grep ``jq 'select(.redact_bypass)'`` for forensic review (v1.5.0).
+  grep ``jq 'select(.redact_bypass)'`` for forensic review (v1.4.0).
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ async def test_audit_only_delivers_silently(
     NOT updated. The LLM sees raw bytes + no warning, same as if the path
     wasn't on the redact list at all.
 
-    v1.5.0: the audit line for the call now carries
+    v1.4.0: the audit line for the call now carries
     ``redact_bypass: true`` so operators can grep
     ``jq 'select(.redact_bypass)'`` for forensic review even though the
     LLM was kept silent.
@@ -240,7 +240,7 @@ async def test_audit_only_delivers_silently(
     ), f"audit_only must stamp redact_bypass on the audit line; got {event}"
 
 
-# --- warn mode also records the audit-line flag (v1.5.0) ---------------
+# --- warn mode also records the audit-line flag (v1.4.0) ---------------
 
 
 @pytest.mark.asyncio
@@ -265,7 +265,7 @@ async def test_warn_mode_also_records_audit_bypass(
     result = await ssh_sftp_download(host="h", path="/opt/app/.env", ctx=ctx)
     # LLM-visible warning still present (existing warn-mode behaviour).
     assert REDACT_BYPASS_WARNING in result.output_warnings
-    # Audit-line bypass flag also present (v1.5.0 addition).
+    # Audit-line bypass flag also present (v1.4.0 addition).
     event = _only_audit_event(caplog)
     assert (
         event.get("redact_bypass") is True

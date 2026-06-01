@@ -148,7 +148,7 @@ class Settings(BaseSettings):
     SSH_RESTRICTED_PATHS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     SSH_COMMAND_ALLOWLIST: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
-    # --- Secret-redaction policy (v1.5.0) ---
+    # --- Secret-redaction policy (v1.4.0) ---
     # Glob-aware sibling to SSH_RESTRICTED_PATHS. Prefix-based ``restricted_paths``
     # stays as-is (cheap, simple); these globs are unioned on the deny side and
     # match via ``pathlib.PurePosixPath.match`` (POSIX semantics; Windows hosts
@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     # of plaintext per secret -- USE WITH CARE. Capped at 4 each side.
     SSH_REDACT_HINT_CHARS: int = 0
 
-    # Local-disk allowlist for the `local_path` upload/download mode (v1.10.0).
+    # Local-disk allowlist for the `local_path` upload/download mode (v1.3.0).
     # When ``ssh_upload`` / ``ssh_deploy`` / ``ssh_sftp_download`` are called
     # with ``local_path=...`` the MCP server reads/writes that file directly
     # on its OWN filesystem instead of routing the bytestream through the
@@ -317,7 +317,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_redact_config(self) -> Settings:
-        """Validate the secret-redaction knobs introduced in v1.5.0.
+        """Validate the secret-redaction knobs introduced in v1.4.0.
 
         Three checks:
 
@@ -354,7 +354,7 @@ class Settings(BaseSettings):
         return self
 
     # --- Observability ---
-    VERSION: str = "1.5.0"
+    VERSION: str = "1.5.1"
     LOG_LEVEL: str = "INFO"
     OTEL_ENABLED: bool = True
 

@@ -61,16 +61,68 @@ sessions inherit the knowledge.
 
 ## Expected sidecar structure
 
-When `agent_notes` is non-empty, expect (and maintain) the **canonical
-structure** documented in
-[`ssh_host_notes_append`](../ssh-host-notes-append/SKILL.md): At-a-glance
-facts (OS / hardware / disks / role) at the top for operator quick-scan,
-followed by Platform quirks / Storage layout / Workloads / Open TODOs,
-ending with the append-only Timeline of timestamped entries (oldest ->
-newest). If the file you read isn't in this shape (legacy minimal-header
-sidecar, free-form drift), plan a consolidation via
-[`ssh_host_notes_set`](../ssh-host-notes-set/SKILL.md) once you have a
-clearer picture of the host -- but don't drop facts.
+The sidecar should follow the **canonical structure** documented in
+[`ssh_host_notes_set`](../ssh-host-notes-set/SKILL.md#canonical-sidecar-structure).
+Quick mental model:
+
+- **Safety first**: `!!! CRITICAL` (only when there's a hard rule) and
+  `DON'Ts` (smaller advisories) live near the top so they ride into
+  context on every ping.
+- **Facts**: At-a-glance / Platform quirks / Storage / Workloads /
+  Access caveats / Cross-host dependencies / Operational heuristics
+  -- include the sections that have real content for THIS host; skip
+  the others. Host-specific subsections (e.g. "Cron-Spezifika") are
+  fine when a recurring theme warrants it.
+- **Action items**: Open TODOs (checkboxes, ticked rather than deleted).
+- **History**: Known interventions (permanent state changes) and
+  Timeline (append-only, oldest -> newest).
+
+`_set` is the structural owner of the shape; `_append` only adds
+Timeline rows.
+
+### Diagnose what you read
+
+After reading, classify the sidecar before deciding what to write:
+
+- **`agent_notes is None`** -- fresh host, no sidecar yet. **Do NOT
+  start with `ssh_host_notes_append`** -- that would create only the
+  minimal bootstrap header (`# Agent notes for <alias>`) and skip the
+  structured head entirely. The correct flow: gather facts via
+  `ssh_host_info` / `ssh_host_disk_usage` / `ssh_host_network` /
+  `ssh_host_processes` / `ssh_docker_ps` / `ssh_systemctl_list_units`
+  as appropriate, then call `ssh_host_notes_set` ONCE with the full
+  canonical skeleton (At-a-glance through Timeline). Subsequent
+  durable lessons land via `_append`.
+
+- **Bootstrap-only sidecar** -- file exists but starts directly with
+  the minimal `# Agent notes for <alias>` header followed by Timeline
+  entries; **no At-a-glance, no Platform quirks, no other head
+  sections** at all. This means the initial structure step was skipped
+  on first contact (someone went straight to `_append` instead of
+  `_set`). **Remediate**: gather facts as above, then `_set` the full
+  canonical body -- preserve every existing Timeline entry verbatim at
+  the bottom, just add the relevant structured head sections at the
+  top (At-a-glance always; the optional sections only where they have
+  real content for this host).
+
+- **Canonical structure present, content drifted** -- the head sections
+  exist but values are stale (At-a-glance still says kernel 6.1 but
+  host is on 6.6 now; Open TODOs has items the operator confirmed
+  completed). **Normal evolution** -- refresh during the next
+  consolidation `_set`. Drift in CONTENT is expected; the trigger to
+  act is the next time you have fresh facts in hand.
+
+- **Free-form drift / unknown shape** -- head sections missing or out
+  of order; no recognizable canonical layout. Treat like the
+  bootstrap-only case: gather facts, then `_set` the full canonical
+  body, preserving any timestamped entries you can identify as
+  Timeline rows (move them under `## Timeline (...)`).
+
+**Rule of thumb:** if the file starts directly with the Timeline (or
+has no structured head at all), the setup step was skipped and should
+be done now. Content changes inside the head sections are normal --
+absence of the head sections is the trigger for `_set` remediation.
+Don't drop facts; consolidation is restructuring, not pruning.
 
 ## When NOT to call it
 

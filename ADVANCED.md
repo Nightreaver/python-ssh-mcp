@@ -170,7 +170,7 @@ Paths and command bodies are reduced to a short SHA-256 prefix. **This supports 
 Optional fields that may appear on a call line:
 
 - `cheatsheet_pattern_id` (string) -- present when the call matched a cheatsheet pattern (see `services/exec_cheatsheet.py`). Emitted whether or not the pattern blocked the call (`SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS` toggles enforcement).
-- `redact_bypass` (bool, v1.5.0+) -- present and `true` when a path-bearing tool delivered raw content from a path that matched `redact_paths_globs` under `redact_bypass_policy=warn` or `audit_only`. Omitted (not `false`) on normal calls so the line stays lean. Operator jq query for forensics: `jq 'select(.redact_bypass)'`. `block` mode raises before the tool body runs, so blocked attempts appear as `result=error` instead -- no separate `redact_bypass` field on the failure line.
+- `redact_bypass` (bool, v1.4.0+) -- present and `true` when a path-bearing tool delivered raw content from a path that matched `redact_paths_globs` under `redact_bypass_policy=warn` or `audit_only`. Omitted (not `false`) on normal calls so the line stays lean. Operator jq query for forensics: `jq 'select(.redact_bypass)'`. `block` mode raises before the tool body runs, so blocked attempts appear as `result=error` instead -- no separate `redact_bypass` field on the failure line.
 
 **The `error` field is the exception class name only** (e.g. `"PathNotAllowed"`, `"AuthenticationFailed"`). Full exception text — which can include remote stderr, sudo prompts, and file paths — stays on the same logger at DEBUG level, correlated by `correlation_id`. That way forensic context is available locally without leaking into whatever shared backend you ship audit to.
 

@@ -21,6 +21,7 @@ from ..models.results import (
     DownloadResult,
     FindResult,
     HashResult,
+    RedactedReadResult,
     SftpEntry,
     SftpListResult,
     StatResult,
@@ -28,7 +29,16 @@ from ..models.results import (
 from ..services.audit import audited
 from ..services.local_path_policy import LOCAL_STREAM_CHUNK_BYTES, resolve_local_path
 from ..services.output_sanitizer import scan as _scan_output
-from ..services.path_policy import resolve_path
+from ..services.path_policy import resolve_path, resolve_path_for_redacted_read
+from ..services.redact_policy import (
+    REDACT_BYPASS_WARNING,
+    check_redact_bypass,
+    resolve_entropy_detection,
+    resolve_hint_chars,
+    resolve_redact_keys,
+    resolve_salt,
+)
+from ..services.redactor import Format, detect_format, redact_text
 from ..services.text import as_str
 from ..ssh.errors import SSHMCPError
 from ._context import pool_from, resolve_host, settings_from
@@ -37,7 +47,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ..config import Settings
-    from ..models.policy import ResolvedHost
+    from ..models.policy import HostPolicy, ResolvedHost
     from ..ssh.pool import ConnectionPool
 
 # POSIX binary per algorithm. All coreutils-standard; output shape is
@@ -83,6 +93,7 @@ async def ssh_sftp_list(
     policy = resolved.policy
     conn = await pool.acquire(resolved)
     canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
+    warnings = _bypass_warnings(canonical, policy, settings)
 
     async with pool.sftp(resolved) as sftp:
         names = sorted(await sftp.listdir(canonical))
@@ -104,6 +115,7 @@ async def ssh_sftp_list(
         offset=offset,
         limit=limit,
         has_more=(offset + len(page)) < total,
+        output_warnings=warnings,
     )
 
 
@@ -117,6 +129,7 @@ async def ssh_sftp_stat(host: str, path: str, ctx: Context) -> StatResult:
     policy = resolved.policy
     conn = await pool.acquire(resolved)
     canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
+    warnings = _bypass_warnings(canonical, policy, settings)
     async with pool.sftp(resolved) as sftp:
         attrs = await sftp.lstat(canonical)
         symlink_target: str | None = None
@@ -132,6 +145,7 @@ async def ssh_sftp_stat(host: str, path: str, ctx: Context) -> StatResult:
         owner=str(attrs.uid) if attrs.uid is not None else None,
         group=str(attrs.gid) if attrs.gid is not None else None,
         symlink_target=symlink_target,
+        output_warnings=warnings,
     )
 
 
@@ -152,7 +166,7 @@ async def ssh_sftp_download(
       ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB); files larger than
       the cap come back with ``truncated=True`` and an empty payload --
       use ``local_path`` for those.
-    - ``local_path=<absolute MCP-host path>`` (v1.3.0): the MCP server
+    - ``local_path=<absolute MCP-host path>`` (v1.10.0): the MCP server
       streams the remote file directly onto its OWN filesystem. The LLM
       never sees the payload. Requires the operator to allowlist the
       destination directory via ``SSH_LOCAL_TRANSFER_ROOTS``. Subject to
@@ -176,6 +190,7 @@ async def ssh_sftp_download(
     policy = resolved.policy
     conn = await pool.acquire(resolved)
     canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
+    bypass_warnings = _bypass_warnings(canonical, policy, settings)
 
     if canonical_local is not None:
         return await _sftp_download_to_local(
@@ -185,6 +200,7 @@ async def ssh_sftp_download(
             canonical=canonical,
             canonical_local=canonical_local,
             settings=settings,
+            extra_warnings=bypass_warnings,
         )
 
     cap = settings.SSH_UPLOAD_MAX_FILE_BYTES  # reuse the upload cap for downloads
@@ -198,6 +214,7 @@ async def ssh_sftp_download(
                 size=size,
                 content_base64="",
                 truncated=True,
+                output_warnings=bypass_warnings,
             )
         async with sftp.open(canonical, "rb") as f:
             data_raw = await f.read()
@@ -221,7 +238,7 @@ async def ssh_sftp_download(
         size=len(data),
         content_base64=base64.b64encode(data).decode("ascii"),
         truncated=False,
-        output_warnings=warnings,
+        output_warnings=[*bypass_warnings, *warnings],
     )
 
 
@@ -233,6 +250,7 @@ async def _sftp_download_to_local(
     canonical: str,
     canonical_local: Path,
     settings: Settings,
+    extra_warnings: list[str] | None = None,
 ) -> DownloadResult:
     """Stream `<canonical>` from the remote SFTP server straight onto the
     MCP host's filesystem at ``canonical_local``.
@@ -312,6 +330,7 @@ async def _sftp_download_to_local(
         content_base64="",
         truncated=False,
         local_path_written=str(canonical_local),
+        output_warnings=list(extra_warnings or []),
     )
 
 
@@ -353,6 +372,7 @@ async def ssh_find(
     policy = resolved.policy
     conn = await pool.acquire(resolved)
     canonical_root = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
+    warnings = _bypass_warnings(canonical_root, policy, settings)
 
     cap = settings.SSH_FIND_MAX_RESULTS
     if policy.platform == "windows":
@@ -381,7 +401,7 @@ async def ssh_find(
         stdout = result.stdout
         if isinstance(stdout, bytes | bytearray):
             stdout = stdout.decode(errors="replace")
-        matches = [line for line in stdout.splitlines() if line]
+        matches = [line for line in (stdout or "").splitlines() if line]
         truncated = len(matches) > cap
         matches = matches[:cap]
     return FindResult(
@@ -389,6 +409,7 @@ async def ssh_find(
         root=canonical_root,
         matches=matches,
         truncated=truncated,
+        output_warnings=warnings,
     )
 
 
@@ -450,6 +471,7 @@ async def ssh_file_hash(
     policy = resolved.policy
     conn = await pool.acquire(resolved)
     canonical = await resolve_path(conn, path, policy, settings, must_exist=True, pool=pool)
+    warnings = _bypass_warnings(canonical, policy, settings)
 
     effective_timeout = float(timeout if timeout is not None else settings.SSH_COMMAND_TIMEOUT)
     if policy.platform == "windows":
@@ -466,6 +488,7 @@ async def ssh_file_hash(
         algorithm=algorithm,
         digest=digest,
         size=size,
+        output_warnings=warnings,
     )
 
 
@@ -641,7 +664,190 @@ async def _sftp_walk_find(
     return matches, False
 
 
+# ---- ssh_read_redacted (v1.4.0) ----
+
+
+@mcp_server.tool(tags={"safe", "read", "group:sftp-read"}, version="1.0")
+@audited(tier="read")
+async def ssh_read_redacted(
+    host: str,
+    path: str,
+    ctx: Context,
+    format: Literal["env", "yaml", "json", "ini", "generic"] | None = None,
+) -> RedactedReadResult:
+    """Read a remote config file and pass it through the secret-redactor
+    before delivering to the LLM.
+
+    The motivating use-case: the LLM has SFTP access to production config
+    files via ``path_allowlist`` and needs to understand how a docker /
+    systemd / app is configured. ``.env`` files mix structural information
+    (which keys exist, how they're named) with secret values (the actual
+    passwords / tokens / API keys). This tool emits the structural info
+    verbatim but replaces every detected secret with a deterministic
+    HMAC-SHA256 prefix marker (``<sha:abcdef123456 len:48>``). Same secret
+    on two hosts → same hash, so the LLM can compare ``DB_PASSWORD``
+    across the fleet without seeing the plaintext.
+
+    Detection
+    ---------
+
+    Three layers:
+
+    1. KEY=VALUE matches (case-insensitive substring on the KEY name)
+       against the resolved redact-key set. Defaults: PASSWORD / PASSWD /
+       SECRET / TOKEN / KEY / PRIVATE / CREDENTIAL / API_KEY / APIKEY /
+       DSN / AUTH / BEARER / COOKIE / SESSION / JWT / OAUTH / SSH_KEY.
+       Operators tune via ``SSH_REDACT_KEYS_ADD`` (append) or
+       ``SSH_REDACT_KEYS_REPLACE`` (swap).
+    2. PEM blocks (``-----BEGIN ... -----END ...``) -- always redacted
+       regardless of the entropy toggle. Private keys / certs are
+       unambiguous.
+    3. (Optional, default on) Entropy detection: high-shape base64 (>=20
+       chars) and hex (>=32 chars) strings on non-comment lines. Toggle
+       via ``SSH_REDACT_ENTROPY_DETECTION=false`` or per-host
+       ``redact_entropy_detection = false``.
+
+    Format
+    ------
+
+    Auto-detected from the path's extension when ``format=None``:
+    ``.env`` / no-extension → ``env``; ``.yml`` / ``.yaml`` → ``yaml``;
+    ``.json`` → ``json``; ``.ini`` / ``.cfg`` / ``.conf`` → ``ini``;
+    anything else → ``generic`` (tries env, then yaml, then json
+    regexes, then entropy detection).
+
+    Limitations
+    -----------
+
+    - YAML multi-line block scalars (``|`` / ``>``) and flow-style
+      mappings are NOT parsed -- they pass through unchanged.
+    - JSON nested arrays / objects are NOT recursed into; only flat
+      ``"key": "value"`` pairs on a single line are matched.
+    - This tool does NOT mitigate raw-exec bypass. ``ssh_exec_run cat
+      /opt/.env`` returns plaintext regardless of redact policy --
+      the realistic mitigation is to NOT allowlist ``cat`` / ``less`` /
+      ``head`` / ``tail`` in ``command_allowlist``. Document this gap
+      in the operator's SKILL when threading this tool into a workflow.
+
+    Bypass-policy interaction
+    -------------------------
+
+    This tool is EXEMPT from the ``redact_bypass_policy=block`` refusal
+    -- it IS the operator-blessed way to read a redact-listed path.
+    Still respects ``restricted_paths`` / ``restricted_globs`` (those are
+    a hard-deny independent of the redact list). The two lists are
+    independent: a path that's hard-denied stays denied; a path that's
+    only on the redact list is readable here.
+
+    Size cap
+    --------
+
+    Reuses ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB) -- redacted
+    reads are config files, not blobs. Oversized files return
+    ``truncated=True`` with empty ``content``.
+    """
+    pool = pool_from(ctx)
+    settings = settings_from(ctx)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    conn = await pool.acquire(resolved)
+    # Custom resolve_path that does NOT trip the redact-bypass block --
+    # ssh_read_redacted is exempt from it by design. Restricted paths +
+    # restricted globs still apply (those are hard-denies orthogonal to
+    # the redact list).
+    canonical = await resolve_path_for_redacted_read(conn, path, policy, settings, must_exist=True, pool=pool)
+
+    fmt: Format = format if format is not None else detect_format(canonical)
+
+    cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
+    async with pool.sftp(resolved) as sftp:
+        attrs = await sftp.stat(canonical)
+        size = int(attrs.size or 0)
+        if size > cap:
+            return RedactedReadResult(
+                host=policy.hostname,
+                path=canonical,
+                size_original=size,
+                content="",
+                format_detected=fmt,
+                redactions=[],
+                truncated=True,
+                output_warnings=[
+                    f"file size {size} bytes exceeds SSH_UPLOAD_MAX_FILE_BYTES={cap}; "
+                    "content omitted. Lower the file size or raise the cap.",
+                ],
+            )
+        async with sftp.open(canonical, "rb") as f:
+            data_raw = await f.read()
+    data: bytes = (
+        data_raw if isinstance(data_raw, bytes | bytearray) else data_raw.encode("utf-8", errors="replace")
+    )
+
+    text = data.decode("utf-8", errors="replace")
+    keys = resolve_redact_keys(policy, settings)
+    salt = resolve_salt(settings)
+    hint_chars = resolve_hint_chars(policy, settings)
+    entropy_detection = resolve_entropy_detection(policy, settings)
+
+    redacted, records = redact_text(
+        text,
+        keys=keys,
+        salt=salt,
+        entropy_detection=entropy_detection,
+        hint_chars=hint_chars,
+        format=fmt,
+    )
+
+    extra_warnings: list[str] = []
+    if not salt:
+        # Plain-SHA256 mode is allowed (operators may not have rotated a
+        # salt yet) but the hash is trivially rainbow-tableable for any
+        # known plaintext. Surface so the LLM doesn't treat the hash as
+        # privacy-preserving for the comparison it might want to do.
+        extra_warnings.append(
+            "SSH_REDACT_SALT is empty; hashes are plain SHA256, attackers with a known "
+            "plaintext can confirm the hash without the salt. Set SSH_REDACT_SALT (>= 32 chars) "
+            "to enable HMAC-SHA256 mode."
+        )
+
+    return RedactedReadResult(
+        host=policy.hostname,
+        path=canonical,
+        size_original=size,
+        content=redacted,
+        format_detected=fmt,
+        redactions=[
+            {"key": rec.key, "hash": rec.hash, "line": rec.line, "kind": rec.kind} for rec in records
+        ],
+        truncated=False,
+        output_warnings=extra_warnings,
+    )
+
+
 # ---- helpers ----
+
+
+def _bypass_warnings(
+    canonical: str,
+    policy: HostPolicy,
+    settings: Settings,
+) -> list[str]:
+    """Translate the redact-bypass mode into ``output_warnings`` entries.
+
+    Used by ssh_sftp_list / ssh_sftp_stat / ssh_sftp_download / ssh_find /
+    ssh_file_hash and the file-ops tools. ``block`` already raised in
+    ``resolve_path`` upstream; we'd never see it here. ``warn`` ⇒ append
+    the standard REDACT_BYPASS_WARNING; ``audit_only`` ⇒ no LLM-visible
+    warning (the audit layer is what the operator monitors -- punted to
+    a future sprint per the briefing).
+
+    Returns an empty list in the common case (path not on the redact
+    list, or the bypass mode is silent).
+    """
+    mode = check_redact_bypass(canonical, policy, settings)
+    if mode == "warn":
+        return [REDACT_BYPASS_WARNING]
+    return []
 
 
 async def _stat_entry(sftp: asyncssh.SFTPClient, full_path: str, name: str) -> SftpEntry:

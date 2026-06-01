@@ -4,12 +4,14 @@ Both work on bytes in memory. Callers are responsible for downloading the
 original file and uploading the result atomically via SFTP — this module
 does not touch the network.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
 
-from unidiff import PatchSet
+# unidiff has no PEP-561 stubs and is too small for a community package; ignore is justified
+from unidiff import PatchSet  # type: ignore[import-untyped]
 
 
 class EditError(ValueError):
@@ -49,9 +51,7 @@ def apply_edit(
 
     if occurrence == "single":
         if count > 1:
-            raise EditError(
-                f"old_string appears {count} times; use occurrence='all' or make it unique"
-            )
+            raise EditError(f"old_string appears {count} times; use occurrence='all' or make it unique")
         return EditOutcome(new_text=text.replace(old_string, new_string, 1), replacements=1)
 
     if occurrence == "all":
@@ -92,9 +92,7 @@ def apply_unified_diff(text: str, diff: str) -> PatchOutcome:
     for hunk in patched_file:
         hunk_start = hunk.source_start - 1  # diff lines are 1-based
         if hunk_start < src_idx:
-            raise PatchError(
-                f"hunk at source line {hunk.source_start} overlaps or precedes a previous hunk"
-            )
+            raise PatchError(f"hunk at source line {hunk.source_start} overlaps or precedes a previous hunk")
         # Carry over unchanged lines up to the hunk start.
         result_lines.extend(lines[src_idx:hunk_start])
         src_idx = hunk_start

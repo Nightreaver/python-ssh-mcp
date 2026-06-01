@@ -13,6 +13,7 @@ Pinned contracts:
 - Defensive: alias regex blocks path-traversal in sidecar filenames.
 - Empty entry rejected; empty content allowed (clears sidecar to 0 bytes).
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,7 @@ import pytest
 
 from ssh_mcp.config import Settings
 from ssh_mcp.models.policy import AuthPolicy, HostPolicy
+from ssh_mcp.tools import host_notes_tools
 from ssh_mcp.tools.host_notes_tools import (
     ssh_host_notes,
     ssh_host_notes_append,
@@ -237,7 +239,9 @@ async def test_append_rejects_empty_entry(tmp_path: Path) -> None:
     hosts = {"web01": _policy("web01")}
     with pytest.raises(ValueError, match="non-empty"):
         await ssh_host_notes_append(
-            host="web01", entry="   \n\t", ctx=_ctx(hosts, notes_dir=tmp_path),
+            host="web01",
+            entry="   \n\t",
+            ctx=_ctx(hosts, notes_dir=tmp_path),
         )
 
 
@@ -261,7 +265,9 @@ async def test_append_raises_when_dir_disabled() -> None:
     hosts = {"web01": _policy("web01")}
     with pytest.raises(ValueError, match="SSH_HOST_NOTES_DIR is unset"):
         await ssh_host_notes_append(
-            host="web01", entry="anything", ctx=_ctx(hosts, notes_dir=None),
+            host="web01",
+            entry="anything",
+            ctx=_ctx(hosts, notes_dir=None),
         )
 
 
@@ -272,9 +278,127 @@ async def test_append_creates_parent_dir(tmp_path: Path) -> None:
     assert not nested.exists()
     hosts = {"web01": _policy("web01")}
     await ssh_host_notes_append(
-        host="web01", entry="first ever", ctx=_ctx(hosts, notes_dir=nested),
+        host="web01",
+        entry="first ever",
+        ctx=_ctx(hosts, notes_dir=nested),
     )
     assert (nested / "web01.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# ssh_host_notes_append: CAS concurrent-writer safety (INC-065, v1.4.0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_append_retries_on_concurrent_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """First CAS attempt sees a stale snapshot (another writer slipped in
+    between our read and our write); the retry loop re-snapshots and the
+    second attempt succeeds. Both the simulated concurrent entry AND our
+    entry must be present at the end."""
+    sidecar = tmp_path / "web01.md"
+    initial = "# Agent notes for `web01`\n\n## 2026-04-20T10:00:00Z\noriginal\n"
+    sidecar.write_text(initial, encoding="utf-8")
+
+    real_write_if_unchanged = host_notes_tools.atomic_write_sidecar_if_unchanged
+    call_count = 0
+
+    def _flaky_write(
+        path: Path,
+        content: str,
+        *,
+        expected_mtime_ns: int | None,
+        expected_size: int | None,
+    ) -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Simulate a concurrent writer: rewrite the sidecar with extra
+            # content BEFORE we attempt our write. The real CAS check
+            # below will then see mtime+size mismatch and return False.
+            path.write_text(
+                initial.rstrip() + "\n\n## 2026-04-20T10:00:01Z\nconcurrent entry\n",
+                encoding="utf-8",
+            )
+        return real_write_if_unchanged(
+            path,
+            content,
+            expected_mtime_ns=expected_mtime_ns,
+            expected_size=expected_size,
+        )
+
+    monkeypatch.setattr(host_notes_tools, "atomic_write_sidecar_if_unchanged", _flaky_write)
+
+    hosts = {"web01": _policy("web01")}
+    result = await ssh_host_notes_append(
+        host="web01",
+        entry="our new entry",
+        ctx=_ctx(hosts, notes_dir=tmp_path),
+    )
+    assert result.was_created is False
+    final = sidecar.read_text(encoding="utf-8")
+    # The concurrent writer's entry survived (CAS prevented us from
+    # silently overwriting it).
+    assert "concurrent entry" in final
+    # Our own entry was applied on the retry against the fresher snapshot.
+    assert "our new entry" in final
+    # We made exactly 2 write attempts (one failed CAS + one success).
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_append_raises_when_concurrent_writers_exhaust_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a concurrent writer beats us every single retry, the call raises
+    a clear RuntimeError naming the file. Prevents unbounded spin under
+    pathological contention."""
+    sidecar = tmp_path / "web01.md"
+    sidecar.write_text("# pre\n", encoding="utf-8")
+
+    def _always_loses(
+        path: Path,
+        content: str,
+        *,
+        expected_mtime_ns: int | None,
+        expected_size: int | None,
+    ) -> bool:
+        # Simulate: another writer always commits between our snapshot
+        # and our write attempt. CAS never succeeds.
+        return False
+
+    monkeypatch.setattr(host_notes_tools, "atomic_write_sidecar_if_unchanged", _always_loses)
+    hosts = {"web01": _policy("web01")}
+    with pytest.raises(RuntimeError, match="concurrent writer"):
+        await ssh_host_notes_append(
+            host="web01",
+            entry="doomed",
+            ctx=_ctx(hosts, notes_dir=tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_append_first_attempt_succeeds_in_uncontended_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sanity: when no concurrent writer is present, the loop succeeds on
+    the first iteration -- no wasted retries, no extra file I/O."""
+    hosts = {"web01": _policy("web01")}
+    real_write_if_unchanged = host_notes_tools.atomic_write_sidecar_if_unchanged
+    call_count = 0
+
+    def _counting(*args: Any, **kwargs: Any) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return real_write_if_unchanged(*args, **kwargs)
+
+    monkeypatch.setattr(host_notes_tools, "atomic_write_sidecar_if_unchanged", _counting)
+    await ssh_host_notes_append(
+        host="web01",
+        entry="single try",
+        ctx=_ctx(hosts, notes_dir=tmp_path),
+    )
+    assert call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +411,9 @@ async def test_set_writes_content_verbatim(tmp_path: Path) -> None:
     hosts = {"web01": _policy("web01")}
     body = "# Cleaned-up notes\n\nKnown facts:\n- deploy@ in docker group\n"
     out = await ssh_host_notes_set(
-        host="web01", content=body, ctx=_ctx(hosts, notes_dir=tmp_path),
+        host="web01",
+        content=body,
+        ctx=_ctx(hosts, notes_dir=tmp_path),
     )
     assert out.was_created is True
     assert (tmp_path / "web01.md").read_text(encoding="utf-8") == body
@@ -301,7 +427,9 @@ async def test_set_replaces_existing_content(tmp_path: Path) -> None:
     hosts = {"web01": _policy("web01")}
 
     out = await ssh_host_notes_set(
-        host="web01", content="fresh content", ctx=_ctx(hosts, notes_dir=tmp_path),
+        host="web01",
+        content="fresh content",
+        ctx=_ctx(hosts, notes_dir=tmp_path),
     )
     assert out.was_created is False
     assert sidecar.read_text(encoding="utf-8") == "fresh content"
@@ -316,7 +444,9 @@ async def test_set_empty_clears_sidecar(tmp_path: Path) -> None:
     hosts = {"web01": _policy("web01")}
 
     await ssh_host_notes_set(
-        host="web01", content="", ctx=_ctx(hosts, notes_dir=tmp_path),
+        host="web01",
+        content="",
+        ctx=_ctx(hosts, notes_dir=tmp_path),
     )
     assert sidecar.read_text(encoding="utf-8") == ""
 

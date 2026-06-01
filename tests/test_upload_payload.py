@@ -6,7 +6,7 @@ Pinned contracts:
 - content_text encodes as UTF-8 (zero-byte file allowed via empty string).
 - content_base64 round-trips bytes verbatim (binary-safe).
 - Existing ssh_upload callers passing content_base64 keep working.
-- local_path (v1.3.0) is covered separately by test_low_access_local_path.py
+- local_path (v1.10.0) is covered separately by test_low_access_local_path.py
   (needs a tmp_path fixture + SSH_LOCAL_TRANSFER_ROOTS override).
 """
 
@@ -97,7 +97,7 @@ async def test_both_text_and_base64_set_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_all_three_sources_set_raises() -> None:
-    """3-way mutex (v1.3.0): passing text + base64 + local_path together
+    """3-way mutex (v1.10.0): passing text + base64 + local_path together
     must still trip the >1 guard, not silently dispatch on the first.
 
     Covers the counter-based check (`sum(... is not None) > 1`) directly

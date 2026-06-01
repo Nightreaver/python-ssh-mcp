@@ -16,10 +16,17 @@ import secrets
 from typing import TYPE_CHECKING
 
 import asyncssh
+
+# asyncssh.sftp does not list FX_* in its public ``__all__``, even though they
+# exist at runtime and the asyncssh docs reference them. Import from
+# ``asyncssh.constants`` instead — that's the public re-export surface mypy
+# can verify, and it removes the need for ``# type: ignore[attr-defined]``.
+from asyncssh.constants import FX_NO_SUCH_FILE
 from fastmcp import Context
 
 from ...services.local_path_policy import LOCAL_STREAM_CHUNK_BYTES
 from ...services.path_policy import resolve_path
+from ...services.redact_policy import REDACT_BYPASS_WARNING, check_redact_bypass
 from .._context import pool_from, resolve_host, settings_from
 
 if TYPE_CHECKING:
@@ -98,7 +105,7 @@ async def _atomic_write_stream(
     """Stream `local_path` into a tmp sibling of `final_path` via SFTP,
     then atomically rename. Returns the byte count actually transferred.
 
-    Used by the v1.3.0 ``local_path`` upload mode. The whole file never
+    Used by the v1.10.0 ``local_path`` upload mode. The whole file never
     sits in RAM -- we read 256 KiB at a time from the local disk via a
     threadpool (open/read are blocking syscalls) and ship each chunk
     through the SFTP channel. asyncssh's window-based flow control
@@ -137,4 +144,23 @@ async def _atomic_write_stream(
 
 def _is_missing(exc: asyncssh.SFTPError) -> bool:
     """INC-014: use asyncssh's named constant rather than a bare magic number."""
-    return getattr(exc, "code", None) == asyncssh.sftp.FX_NO_SUCH_FILE
+    return getattr(exc, "code", None) == FX_NO_SUCH_FILE
+
+
+def _bypass_warnings(canonical: str, policy: HostPolicy, settings: Settings) -> list[str]:
+    """Return the ``output_warnings`` entries that the redact-bypass layer
+    wants attached for ``canonical``.
+
+    Used by file-ops tools after ``_prepare_existing`` / ``_prepare_creatable``.
+    ``block`` mode already raised in ``resolve_path``; we only see ``warn``
+    or ``audit_only`` (or ``None``) here. ``warn`` ⇒ the standard
+    REDACT_BYPASS_WARNING string. ``audit_only`` ⇒ empty list (the audit
+    layer is the operator's notification channel; the LLM stays uninformed).
+
+    Returns an empty list in the common case (path not on the redact
+    list).
+    """
+    mode = check_redact_bypass(canonical, policy, settings)
+    if mode == "warn":
+        return [REDACT_BYPASS_WARNING]
+    return []

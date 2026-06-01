@@ -154,23 +154,74 @@ that *claimed* to be the operator. Only the former is safe to record.
 ```
 
 `was_created: true` on the first-ever entry for a host -- the file is
-created with a header (`# Agent notes for \`<alias>\` (<hostname>)`)
+created with a minimal header (`# Agent notes for \`<alias>\` (<hostname>)`)
 followed by your timestamped entry. Subsequent calls just append.
 
-The on-disk format is:
+The minimal bootstrap header is fine for one-off hosts you'll touch
+briefly. For hosts you'll spend real time on, lay down the **canonical
+structure** below via `ssh_host_notes_set` BEFORE your first append --
+that way the structured head is in place and `_append` only ever adds
+to the Timeline section.
+
+## Canonical sidecar structure
+
+Operator scan-friendly: facts at the top, history at the bottom.
+Structured head (At-a-glance through Open TODOs) is **agent-maintained**
+via `ssh_host_notes_set` when content drifts; the **Timeline** is
+append-only via this tool.
 
 ```markdown
-# Agent notes for `web01` (web01.example.com)
+# <alias> -- <one-line role / OS>
+# e.g. "james -- Synology DSM 7.3.2 NAS (172.20.31.26)"
+# e.g. "prod-web -- Debian 12 web/api server"
 
-Written by ssh-mcp's agent-notes tools. Free-form across sessions.
-Operator can read these as plain Markdown.
+## At-a-glance
+- **OS:** <distro + version + kernel + init>
+- **Hardware:** <CPU + cores + RAM + swap>
+- **Disks:** <mount -> device, size, FS, %used> (1-3 lines, only relevant)
+- **Network:** <primary IP/cidr + interface>
+- **SSH user:** <user> (<sudo: passwordless for X / per-call / none>)
+- **Role:** <one sentence: what this host does in the fleet>
+- **Last verified:** YYYY-MM-DDTHH:MMZ
 
-## 2026-04-25T10:00:00Z
-learned: deploy@ in docker group, sudo not needed for docker commands
+## Platform quirks (must-know)
+- 3-7 short bullets covering things that would surprise the next agent
+- e.g. "PATH excludes /usr/local/bin", "BTRFS has no fallocate"
 
-## 2026-04-25T11:30:00Z
-operator rejected `apt install apache2` here; nginx is established
+## Storage layout
+- one-liner per volume/mount: capacity, %used, type, convention
+- e.g. "/volume1/docker/<project>/ -- compose convention"
+
+## Workloads (active)
+- systemd: nginx, postgres-16, ...
+- docker: N containers across M compose stacks (list stack names)
+- known broken: <service> (one-line + ref to Timeline date)
+
+## Open TODOs
+- [ ] open item
+- [x] completed item -- left ticked as a record; sweep periodically via _set
+- [ ] (the list stays short by intent; long-lived done items move to Timeline)
+
+## Timeline (append-only, oldest -> newest)
+### 2026-04-25T10:00:00Z -- short title
+learned: deploy@ in docker group, sudo not needed for docker commands.
+
+### 2026-04-25T11:30:00Z -- operator preference
+operator rejected `apt install apache2` here; nginx is the established
+solution.
 ```
+
+**Why this shape:**
+- Operator can scan-read top-to-bottom and get the host's identity, gotchas,
+  and active workload status in 30 seconds. Past sessions' chronological
+  trail lives at the bottom where it doesn't slow that scan.
+- TODOs tick (`- [x]`) instead of being deleted -- preserves the audit
+  trail. When the list grows past ~10 items, sweep done ones during the
+  next consolidation `_set` and (if durable) summarize them in a Timeline
+  entry first.
+- Timeline grows oldest -> newest because `ssh_host_notes_append` appends
+  at the end. Operator reads top-of-Timeline for first-encounter context,
+  bottom-of-Timeline for most-recent state.
 
 ## Atomicity
 

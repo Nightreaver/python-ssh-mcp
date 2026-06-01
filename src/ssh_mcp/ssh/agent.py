@@ -6,6 +6,7 @@ agent client returns `SSHAgentKeyPair` objects (not `SSHKey`), which lack a
 `get_fingerprint` method — we compute the standard `SHA256:<b64>` digest from
 the key's raw public bytes so the format matches `ssh-keygen -l -f key.pub`.
 """
+
 from __future__ import annotations
 
 import base64
@@ -47,6 +48,12 @@ async def list_agent_fingerprints(agent_path: Path | None = None) -> list[str]:
     except (OSError, asyncssh.Error) as exc:
         logger.debug("agent enumeration failed at %r: %s", sock, exc)
         return []
+    # Defensive: ``asyncssh.SSHAgentClient.__aexit__`` cannot suppress
+    # exceptions in any documented configuration, but mypy can't prove
+    # that statically. Falling through here would mean the context manager
+    # ate an exception we didn't catch — return an empty list rather than
+    # implicitly returning ``None`` (which would violate the signature).
+    return []
 
 
 async def select_agent_key(

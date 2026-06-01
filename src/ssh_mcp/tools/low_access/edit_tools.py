@@ -12,7 +12,7 @@ from ...app import mcp_server
 from ...models.results import WriteResult
 from ...services.audit import audited
 from ...services.edit_service import EditError, PatchError, apply_edit, apply_unified_diff
-from ._helpers import WriteError, _atomic_write, _prepare_existing
+from ._helpers import WriteError, _atomic_write, _bypass_warnings, _prepare_existing
 
 # --------- ssh_edit ---------
 
@@ -29,6 +29,7 @@ async def ssh_edit(
 ) -> WriteResult:
     """Structured edit: replace `old_string` with `new_string` atomically."""
     pool, policy, settings, _conn, canonical = await _prepare_existing(ctx, host, path)
+    warnings = _bypass_warnings(canonical, policy, settings)
     cap = settings.SSH_EDIT_MAX_FILE_BYTES
     async with pool.sftp_policy(policy) as sftp:
         attrs = await sftp.stat(canonical)
@@ -37,12 +38,17 @@ async def ssh_edit(
             raise WriteError(f"file {size} bytes exceeds SSH_EDIT_MAX_FILE_BYTES={cap}")
         async with sftp.open(canonical, "rb") as f:
             raw = await f.read()
+        # asyncssh's stub for ``SFTPFile.read()`` declares ``str | bytes``
+        # even in ``"rb"`` mode; in practice the runtime always returns
+        # ``bytes`` here. Coerce defensively so mypy strict can prove the
+        # ``.decode()`` call below is sound (same shape as ssh_sftp_download).
+        raw_bytes: bytes = raw if isinstance(raw, bytes | bytearray) else raw.encode("utf-8")
         # INC-010: surface a clean WriteError on non-UTF-8 files rather than
         # letting a raw UnicodeDecodeError escape. Using errors='replace' would
         # be worse -- we'd write back mangled bytes. Caller should fall back
         # to ssh_sftp_download + offline edit + ssh_upload for binary files.
         try:
-            text = raw.decode("utf-8")
+            text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise WriteError(
                 f"{canonical!r} is not valid UTF-8 (offset {exc.start}); "
@@ -61,6 +67,7 @@ async def ssh_edit(
         success=True,
         bytes_written=len(outcome.new_text.encode("utf-8")),
         message=f"replaced {outcome.replacements} occurrence(s)",
+        output_warnings=warnings,
     )
 
 
@@ -77,6 +84,7 @@ async def ssh_patch(
 ) -> WriteResult:
     """Apply a unified diff to a single file atomically."""
     pool, policy, settings, _conn, canonical = await _prepare_existing(ctx, host, path)
+    warnings = _bypass_warnings(canonical, policy, settings)
     cap = settings.SSH_EDIT_MAX_FILE_BYTES
     async with pool.sftp_policy(policy) as sftp:
         attrs = await sftp.stat(canonical)
@@ -85,12 +93,17 @@ async def ssh_patch(
             raise WriteError(f"file {size} bytes exceeds SSH_EDIT_MAX_FILE_BYTES={cap}")
         async with sftp.open(canonical, "rb") as f:
             raw = await f.read()
+        # asyncssh's stub for ``SFTPFile.read()`` declares ``str | bytes``
+        # even in ``"rb"`` mode; in practice the runtime always returns
+        # ``bytes`` here. Coerce defensively so mypy strict can prove the
+        # ``.decode()`` call below is sound (same shape as ssh_sftp_download).
+        raw_bytes: bytes = raw if isinstance(raw, bytes | bytearray) else raw.encode("utf-8")
         # INC-010: surface a clean WriteError on non-UTF-8 files rather than
         # letting a raw UnicodeDecodeError escape. Using errors='replace' would
         # be worse -- we'd write back mangled bytes. Caller should fall back
         # to ssh_sftp_download + offline edit + ssh_upload for binary files.
         try:
-            text = raw.decode("utf-8")
+            text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise WriteError(
                 f"{canonical!r} is not valid UTF-8 (offset {exc.start}); "
@@ -109,4 +122,5 @@ async def ssh_patch(
         success=True,
         bytes_written=len(outcome.new_text.encode("utf-8")),
         message=f"{outcome.hunks_applied} hunk(s) applied",
+        output_warnings=warnings,
     )

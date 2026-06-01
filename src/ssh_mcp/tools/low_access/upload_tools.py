@@ -1,7 +1,7 @@
 """Low-access write tools: ``ssh_upload`` + ``ssh_deploy``.
 
 Three payload sources behind a single tool surface: ``content_text``,
-``content_base64``, ``local_path`` (v1.3.0). Mutex + local-path policy
+``content_base64``, ``local_path`` (v1.10.0). Mutex + local-path policy
 enforcement live in :func:`_resolve_upload_payload` and run BEFORE any
 SSH connection is acquired.
 """
@@ -27,6 +27,7 @@ from ._helpers import (
     WriteError,
     _atomic_write,
     _atomic_write_stream,
+    _bypass_warnings,
     _prepare_creatable,
 )
 
@@ -70,7 +71,7 @@ async def ssh_upload(
       (tarballs, images, compiled artifacts) where invalid UTF-8 must
       round-trip cleanly. Subject to ``SSH_UPLOAD_MAX_FILE_BYTES``
       (default 256 MiB) since the payload crosses the MCP JSON channel.
-    - `local_path` (v1.3.0): absolute path on the MCP server's OWN
+    - `local_path` (v1.10.0): absolute path on the MCP server's OWN
       filesystem. The bytes are streamed from local disk directly into
       the SFTP write -- never round-tripping through the LLM as base64.
       Requires the operator to allowlist the source directory via
@@ -84,6 +85,7 @@ async def ssh_upload(
     settings = settings_from(ctx)
     payload = await _resolve_upload_payload(content_text, content_base64, local_path, settings)
     pool, policy, _settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
+    warnings = _bypass_warnings(canonical, policy, settings)
     if isinstance(payload, _InlinePayload):
         cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
         if len(payload.data) > cap:
@@ -96,6 +98,7 @@ async def ssh_upload(
             success=True,
             bytes_written=len(payload.data),
             message="uploaded (atomic)",
+            output_warnings=warnings,
         )
 
     # `local_path` streaming path. Cap and policy were enforced inside
@@ -109,6 +112,7 @@ async def ssh_upload(
         bytes_written=bytes_written,
         message=f"uploaded from {payload.local_path} (atomic, streamed)",
         local_path_written=str(payload.local_path),
+        output_warnings=warnings,
     )
 
 
@@ -152,7 +156,7 @@ async def _resolve_upload_payload(
     deliberate valid input (write a zero-byte file), so we can't use
     truthiness.
 
-    Three-way mutex (v1.3.0): adding ``local_path`` made the previous
+    Three-way mutex (v1.10.0): adding ``local_path`` made the previous
     two-source check insufficient. We count the non-None sources rather
     than handle each pair, so a future fourth source slots in cleanly.
 
@@ -229,6 +233,7 @@ async def ssh_deploy(
     settings = settings_from(ctx)
     payload = await _resolve_upload_payload(content_text, content_base64, local_path, settings)
     pool, policy, _settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
+    deploy_warnings = _bypass_warnings(canonical, policy, settings)
     if isinstance(payload, _InlinePayload):
         cap = settings.SSH_UPLOAD_MAX_FILE_BYTES
         if len(payload.data) > cap:
@@ -265,6 +270,7 @@ async def ssh_deploy(
         "success": True,
         "bytes_written": bytes_written,
         "message": msg,
+        "output_warnings": deploy_warnings,
     }
     if isinstance(payload, _LocalFilePayload):
         write_kwargs["local_path_written"] = str(payload.local_path)

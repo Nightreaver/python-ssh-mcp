@@ -4,7 +4,7 @@ Tools are grouped by **tier** (which `ALLOW_*` flag they require) and within eac
 
 For a full per-tool runbook, follow the **skill** link on each entry — the SKILL.md files cover `When to call`, `When NOT to call`, examples, common failures, and related tools.
 
-- 92 tools total
+- 99 tools total
 - 10 tool groups: `host`, `session`, `sftp-read`, `file-ops`, `exec`, `sudo`, `shell`, `docker`, `systemctl`, `pkg`
 - 4 tiers: read (always on) · low-access · dangerous · sudo
 - See [README.md](README.md) for tier flags, host config, restricted paths, BM25 search, and `SSH_ENABLED_GROUPS` examples.
@@ -17,34 +17,35 @@ Regenerate via `uv run python .claude/scripts/catalog-size.py` (or `.venv/Script
 
 | Group | Tools | Bytes | ~Tokens | Avg / tool |
 |---|---:|---:|---:|---:|
-| `docker` | 26 | 19,176 | ~4,794 | 737 B |
+| `docker` | 27 | 20,053 | ~5,013 | 743 B |
 | `file-ops` | 11 | 10,898 | ~2,724 | 990 B |
 | `host` | 13 | 10,069 | ~2,517 | 774 B |
 | `systemctl` | 17 | 8,290 | ~2,072 | 487 B |
+| `sftp-read` | 6 | 7,737 | ~1,934 | 1,289 B |
+| `sudo` | 7 | 6,943 | ~1,735 | 992 B |
 | `pkg` | 9 | 4,479 | ~1,119 | 497 B |
-| `sftp-read` | 5 | 4,342 | ~1,085 | 868 B |
-| `exec` | 4 | 3,979 | ~994 | **994 B** (densest — rich input schemas) |
-| `sudo` | 2 | 1,584 | ~396 | 792 B |
+| `exec` | 4 | 3,979 | ~994 | **994 B** (densest -- rich input schemas) |
 | `shell` | 4 | 1,377 | ~344 | 344 B |
 | `session` | 1 | 154 | ~38 | 154 B |
-| **Total** | **92** | **64,348** | **~16,087** | — |
+| **Total** | **99** | **73,979** | **~18,494** | — |
 
 **Savings from common `SSH_ENABLED_GROUPS` trims:**
 
-- Drop `docker` only → ~11,293 tok (saves **~4,794 tok / 30%** — biggest single win)
-- Drop `systemctl` only → ~14,015 tok (saves **~2,072 tok / 13%**)
-- Drop both → ~9,221 tok (saves **~6,866 tok / 43%**)
-- Keep only `host,sftp-read,docker` (observability + container triage) → ~8,396 tok (saves **~7,691 tok / 48%**)
-- Keep only `host,session,systemctl` (systemd-triage persona) → ~4,627 tok (saves **~11,460 tok / 71%**)
+- Drop `docker` only → ~13,481 tok (saves **~5,013 tok / 27%** -- biggest single win)
+- Drop `systemctl` only → ~16,422 tok (saves **~2,072 tok / 11%**)
+- Drop both → ~11,409 tok (saves **~7,085 tok / 38%**)
+- Keep only `host,sftp-read,docker` (observability + container triage) → ~10,199 tok (saves **~8,295 tok / 45%**)
+- Keep only `host,session,systemctl` (systemd-triage persona) → ~5,362 tok (saves **~13,132 tok / 71%**)
+- Drop `sudo` (no privileged ops needed) → ~16,759 tok (saves **~1,735 tok / 9%**)
 
 ## Contents
 
 - [Platform compatibility matrix](#platform-compatibility-matrix)
 - [How to read each entry](#how-to-read-each-entry)
-- [Read tier (always on)](#read-tier-always-on) — 39 tools
+- [Read tier (always on)](#read-tier-always-on) — 41 tools
 - [Low-access tier](#low-access-tier-allow_low_access_toolstrue) — 22 tools (`ALLOW_LOW_ACCESS_TOOLS=true`)
 - [Dangerous tier](#dangerous-tier-allow_dangerous_toolstrue) — 29 tools (`ALLOW_DANGEROUS_TOOLS=true`)
-- [Sudo tier](#sudo-tier-allow_sudotrue) — 2 tools (`ALLOW_SUDO=true`)
+- [Sudo tier](#sudo-tier-allow_sudotrue) — 7 tools (`ALLOW_SUDO=true`)
 - [Cross-cutting safeguards](#cross-cutting-safeguards)
 
 ## Platform compatibility matrix
@@ -73,11 +74,11 @@ Tools tagged **POSIX-only** refuse Windows targets with `PlatformNotSupported` (
 
 ## Sections by group
 
-- [Read tier](#read-tier-always-on) — 39 tools, no flag needed
+- [Read tier](#read-tier-always-on) — 41 tools, no flag needed
   - [Host & connection](#host--connection-grouphost) (10)
   - [Sessions](#sessions-groupsession) (1)
-  - [SFTP reads](#sftp-reads-groupsftp-read) (5)
-  - [Docker (read)](#docker-read-groupdocker) (10)
+  - [SFTP reads](#sftp-reads-groupsftp-read) (6)
+  - [Docker (read)](#docker-read-groupdocker) (11)
   - [systemctl (read)](#systemctl-read-groupsystemctl) (8)
   - [Package management (read)](#package-management-read-grouppkg) (4)
   - [Persistent shell (read)](#persistent-shell-read-groupshell) (1)
@@ -92,7 +93,7 @@ Tools tagged **POSIX-only** refuse Windows targets with `PlatformNotSupported` (
   - [systemctl (mutating)](#systemctl-mutating-groupsystemctl) (9)
   - [Package management (mutating)](#package-management-mutating-grouppkg) (5)
   - [Persistent shell (open + exec)](#persistent-shell-open--exec-groupshell) (2)
-- [Sudo tier](#sudo-tier-allow_sudotrue) — 2 tools (`ALLOW_SUDO=true`, also requires dangerous)
+- [Sudo tier](#sudo-tier-allow_sudotrue) — 7 tools (`ALLOW_SUDO=true`, also requires dangerous)
 - [Cross-cutting safeguards](#cross-cutting-safeguards)
 
 ---
@@ -174,13 +175,14 @@ path_allowlist = ["/var/log", "/opt/app"]          # scope for sftp-read + find
 
 ## SFTP reads (`group:sftp-read`)
 
-All paths canonicalized via remote `realpath -m` and verified inside `path_allowlist`; rejected by `restricted_paths`.
+All paths canonicalized via remote `realpath -m` and verified inside `path_allowlist`; rejected by `restricted_paths` and `restricted_globs`. Paths that match `redact_paths_globs` trip the `redact_bypass_policy` — use `ssh_read_redacted` for those paths.
 
 - **`ssh_sftp_list`** — List a directory with offset/limit pagination. Returns `entries[]` + `has_more`. Inputs: `host`, `path`, `offset` (0), `limit` (200). [skill](skills/ssh-sftp-list/SKILL.md)
 - **`ssh_sftp_stat`** — File/dir metadata (kind, size, mode, mtime, owner, group, symlink target). Inputs: `host`, `path`. [skill](skills/ssh-sftp-stat/SKILL.md)
-- **`ssh_sftp_download`** — Download a remote file. Default mode: base64-encoded content in the response, size-capped at `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB). `local_path` mode: streams to a path on the MCP host's filesystem (up to `SSH_LOCAL_TRANSFER_MAX_BYTES`, default 2 GiB; requires `SSH_LOCAL_TRANSFER_ROOTS`). Result includes `local_path_written` when `local_path` is used. Inputs: `host`, `path`, `local_path` (optional). [skill](skills/ssh-sftp-download/SKILL.md)
+- **`ssh_sftp_download`** — Download a remote file. Default mode: base64-encoded content in the response, size-capped at `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB). `local_path` mode: streams to a path on the MCP host's filesystem (up to `SSH_LOCAL_TRANSFER_MAX_BYTES`, default 2 GiB; requires `SSH_LOCAL_TRANSFER_ROOTS`). Result includes `local_path_written` when `local_path` is used. Raises `RedactBypassBlocked` (default) when path matches `redact_paths_globs` and `redact_bypass_policy=block`; use `ssh_read_redacted` for those paths. Inputs: `host`, `path`, `local_path` (optional). [skill](skills/ssh-sftp-download/SKILL.md)
 - **`ssh_find`** — `find <path> -maxdepth N -type T -name PATTERN`. Pattern regex-validated, results capped at `SSH_FIND_MAX_RESULTS`. Inputs: `host`, `root`, `name_pattern`, `kind` (`file`/`dir`/`symlink`/`any`), `max_depth`. [skill](skills/ssh-find/SKILL.md)
 - **`ssh_file_hash`** — MD5 / SHA1 / SHA256 / SHA512 of a remote file. POSIX: `<algo>sum`. Windows: `Get-FileHash`. Returns lowercase hex digest + byte size. Use after `ssh_upload` / `ssh_deploy` / `ssh_docker_cp` to verify the transfer landed intact; MD5/SHA1 included for legacy checksums but NOT collision-resistant. Inputs: `host`, `path`, `algorithm` (default `sha256`). [skill](skills/ssh-file-hash/SKILL.md)
+- **`ssh_read_redacted`** — Read a remote config file (`.env` / `.yml` / `.json` / `.ini` / generic) and pass it through the secret-redactor before delivering to the LLM. Secrets replaced by deterministic `<sha:abcdef123456 len:48>` markers (HMAC-SHA256, 12-char prefix). Three detection layers: key-name match (case-insensitive substring on default + configured keys), PEM blocks (always), entropy detection (base64 >= 20 chars / hex >= 32 chars, default on). Format auto-detected from extension. Exempt from `redact_bypass_policy=block` — this IS the operator-blessed path for redact-listed files. Still respects `restricted_paths` / `restricted_globs`. Returns `RedactedReadResult` with `content`, `redactions[]`, `format_detected`. Inputs: `host`, `path`, `format` (optional; auto-detected). [skill](skills/ssh-read-redacted/SKILL.md)
 
 ## Docker (read) (`group:docker`)
 
@@ -191,6 +193,7 @@ All paths canonicalized via remote `realpath -m` and verified inside `path_allow
 - **`ssh_docker_top`** — Process list inside a container (`docker top`). Plain `ps`-style text in `stdout` (no JSON format at the docker level). `ps_options` accepts extra argv (`-eo pid,user,comm`); shell metacharacters rejected. Inputs: `host`, `container`, `ps_options`. [skill](skills/ssh-docker-top/SKILL.md)
 - **`ssh_docker_events`** — Daemon event stream over a bounded time window (`docker events --since <since> --until <until> --format '{{json .}}'`). Answers "what just happened?" in one call: OOM kills, restarts, health transitions, image pulls. `since` / `until` accept relative (`10m`), epoch, RFC3339, or `now`; `filters` = `["container=nginx", "event=die"]`. Inputs: `host`, `since` (default `"10m"`), `until` (default `"now"`), `filters`. [skill](skills/ssh-docker-events/SKILL.md)
 - **`ssh_docker_volumes`** — List volumes (`docker volume ls --format '{{json .}}'`) or inspect one by name (`docker volume inspect -- <name>`). Use before any `ssh_docker_prune(scope="volume")` decision — named volumes often carry application state. Inputs: `host`, `name` (optional; None = list, set = inspect). [skill](skills/ssh-docker-volumes/SKILL.md)
+- **`ssh_docker_system_df`** — Disk-usage summary across docker object types (`docker system df --format '{{json .}}'`). Returns 4 rows under `categories`: Images, Containers, Local Volumes, Build Cache — each with `TotalCount`, `Active`, `Size`, `Reclaimable` as Docker's human-readable strings (e.g. `"1.5GB (45%)"`). Run BEFORE `ssh_docker_prune` to estimate impact, or as the fast "why is `/var/lib/docker` getting full?" answer. Inputs: `host`. [skill](skills/ssh-docker-system-df/SKILL.md)
 - **`ssh_docker_images`** — List local images. `Labels` stripped by default. Filter kwargs map to `--filter`: `reference` (glob-style image ref, supports `*`/`?`/digests, e.g. `ghcr.io/org/*:*`), `dangling` (bool; `True`=untagged only, `False`=tagged only), `label` (same form as `ssh_docker_ps`). All filters validated before I/O. Inputs: `host`, `include_labels` (False), `reference` (None), `dangling` (None), `label` (None). [skill](skills/ssh-docker-images/SKILL.md)
 - **`ssh_docker_compose_ps`** — List compose-project services. `Labels` stripped by default. `compose_file` path-allowlist-checked. Filter kwargs: `service` (trailing positional, narrows to one compose service; same name regex as containers), `status` (`paused`/`restarting`/`removing`/`running`/`dead`/`created`/`exited`; note `removing` is compose-only). `--filter status=` is placed before the positional service name. Inputs: `host`, `compose_file`, `include_labels` (False), `service` (None), `status` (None). [skill](skills/ssh-docker-compose-ps/SKILL.md)
 - **`ssh_docker_compose_logs`** — Compose logs with same context guards as `ssh_docker_logs`. Inputs: `host`, `compose_file`, `tail`, `service`, `max_bytes`. [skill](skills/ssh-docker-compose-logs/SKILL.md)
@@ -358,8 +361,13 @@ command_allowlist = ["systemctl", "postgresql"]    # also applies to sudo_exec
 # Password: SSH_SUDO_PASSWORD_CMD=... / OS keyring / passwordless (see Sudo section in README)
 ```
 
-- **`ssh_sudo_exec`** — Run a command under `sudo -S -p '' --`. Allowlist-checked like `ssh_exec_run`. Password piped over stdin, never appears in argv. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-sudo-exec/SKILL.md)
+- **`ssh_sudo_exec`** — Run a command under `sudo -S -p '' --`. Allowlist-checked like `ssh_exec_run`. Password piped over stdin, never appears in argv. Path-aware cheatsheet (v1.4.0) intercepts `sudo cat`/`sudo ls`/`sudo tee`/`sudo vi` etc. and redirects to the dedicated path tools below. Inputs: `host`, `command`, `timeout`. [skill](skills/ssh-sudo-exec/SKILL.md)
 - **`ssh_sudo_run_script`** — Run a multi-line script under `sudo -S sh -s --`. Body on stdin after the password line; no allowlist check (same rationale as `ssh_exec_script`). Inputs: `host`, `script`, `timeout`. [skill](skills/ssh-sudo-run-script/SKILL.md)
+- **`ssh_sudo_read`** — Read a root-owned file via `sudo cat --`; returns base64 bytes (`DownloadResult`). Full policy chain: allowlist + restricted_paths/globs + redact_bypass_policy (fires before sudo). Use `ssh_sudo_read_redacted` when `redact_bypass_policy=block` applies. Cap: `SSH_UPLOAD_MAX_FILE_BYTES` (256 MiB). Inputs: `host`, `path`. [skill](skills/ssh-sudo-read/SKILL.md)
+- **`ssh_sudo_read_redacted`** — Sudo-elevated counterpart to `ssh_read_redacted`. Reads via `sudo cat`, runs the secret-redactor, returns `RedactedReadResult` with HMAC-SHA256 markers. Bypass-exempt (this IS the allowed alternative to `redact_bypass_policy=block`). Inputs: `host`, `path`, `format`. [skill](skills/ssh-sudo-read-redacted/SKILL.md)
+- **`ssh_sudo_write`** — Atomic sudo write via tmp+chmod+chown+mv. Three-way payload mutex: `content_text` / `content_base64` / `local_path` (reads MCP-host file into memory; requires `SSH_LOCAL_TRANSFER_ROOTS`). Ownership preserved via pre-stat; new files default to root:root + warning. Caps: 256 MiB inline, 2 GiB local_path. Inputs: `host`, `path`, `content_text`, `content_base64`, `local_path`, `mode`, `chown_user`, `chown_group`. [skill](skills/ssh-sudo-write/SKILL.md)
+- **`ssh_sudo_edit`** — Sudo-elevated structured edit: sudo read + `apply_edit` + sudo atomic write-back. Preserves both ownership AND mode (stat-first -- a 0o600 secrets file stays 0o600). Same `single`/`all` occurrence semantics as `ssh_edit`. Cap: `SSH_EDIT_MAX_FILE_BYTES` (10 MiB). Inputs: `host`, `path`, `old_string`, `new_string`, `occurrence`. [skill](skills/ssh-sudo-edit/SKILL.md)
+- **`ssh_sudo_sftp_list`** — List a root-owned directory via `sudo ls -la --time-style=full-iso`; parsed into `SftpListResult.entries` (same shape as `ssh_sftp_list`). Pagination post-parse. BusyBox hosts: rows without `--time-style=full-iso` silently dropped. Inputs: `host`, `path`, `offset`, `limit`. [skill](skills/ssh-sudo-sftp-list/SKILL.md)
 
 ---
 

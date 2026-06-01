@@ -26,8 +26,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..ssh.errors import CommandIsCheatsheetMatch
+
+if TYPE_CHECKING:
+    from ..config import Settings
+    from ..models.policy import HostPolicy
 
 __all__ = [
     "CheatsheetMatch",
@@ -132,6 +137,80 @@ _REDIRECT_RE = re.compile(r"(?<![&\d>])>(?!>)\s*(?P<target>\S+)")
 
 
 # ---------------------------------------------------------------------------
+# v1.4.0: read / list / sudo-prefix patterns.
+#
+# Path-aware suggestion: when the path is unambiguously extractable, we
+# match it against ``redact_paths_globs`` and route to the ``_redacted``
+# variant when it hits. When the command shape is too complex to extract
+# a single path (awk, sed, grep, file -- any of which take flags,
+# expressions, or multiple files), we fall back to a path-agnostic
+# rejection with the plain tool name; the LLM still gets the redirect.
+#
+# Trade-off documented per-pattern. INC-064 follow-up: this is a partial
+# mitigation. ``awk '{print}' .env`` still works because we refuse to
+# extract paths from awk; the spec accepts that as the doomed
+# arms-race we declined to pursue.
+# ---------------------------------------------------------------------------
+
+# Single-path read commands. Optional flags consumed; the LAST whitespace-
+# separated token is treated as the path. We accept ``head -n 100 path``
+# and ``tail -n 100 path`` shapes; ``cat /path``, ``less /path``, etc.
+_READ_SINGLE_RE = re.compile(
+    r"^\s*(?P<cmd>cat|head|tail|less|more|view|xxd|od|strings|wc)"
+    r"(?:\s+-\S+(?:\s+\S+)?)*"
+    r"\s+(?P<path>\S+)\s*$"
+)
+
+# Ambiguous-path read commands: awk, sed, grep, file. These take filters,
+# expressions, multiple files, or BRE/ERE patterns -- extracting a single
+# path reliably is not feasible. We refuse with a generic message.
+_READ_AMBIGUOUS_RE = re.compile(r"^\s*(?P<cmd>awk|sed|grep|file)\s+\S")
+
+# ``ls`` with optional flags then a single path. We treat ls as path-aware
+# but listing tools don't trip the redact list (we list directories, not
+# secret files), so no _redacted variant -- always ``ssh_sftp_list``.
+_LIST_SINGLE_RE = re.compile(r"^\s*ls(?:\s+-\w+)*\s+(?P<path>\S+)\s*$")
+
+# Sudo-prefix variants. We strip the leading ``sudo\s+`` (and optional sudo
+# flags ``-u user`` / ``-n`` / ``-S`` / ``-H`` / ``-i`` / ``-E`` -- the
+# minimum operators typically pass) so the same path-extraction regexes
+# match the inner command. The match is on the FULL command so we can
+# decide path-aware-ness without re-running the regex.
+_SUDO_PREFIX_RE = re.compile(
+    r"^\s*sudo(?:\s+-[A-Za-z]+(?:\s+\S+)?)*\s+(?P<rest>.+)$",
+    re.DOTALL,
+)
+
+# ``sudo tee <path>``: a tee redirect is the canonical "write a file with
+# sudo" pattern (``echo ... | sudo tee /etc/foo``). The PIPED-IN content
+# is what the operator wants to write; ``ssh_sudo_write(content_text=...)``
+# is the structured equivalent.
+_SUDO_TEE_RE = re.compile(r"^\s*tee(?:\s+-\S+)*\s+(?P<path>\S+)\s*$")
+
+# ``sudo sh -c 'cat > <path>'`` and friends: the operator embeds a
+# write redirect in a sudo-elevated shell. We extract the path between
+# ``cat >`` and the next whitespace / quote. Catches the common
+# ``sudo sh -c 'cat > /etc/foo'`` pattern; complex heredocs / pipes
+# fall through (not caught here -- documented limit).
+_SUDO_SH_C_CAT_RE = re.compile(
+    r"""^\s*sh\s+-c\s+['"]\s*cat\s+>\s*(?P<path>[^\s'"]+).*['"]\s*$""",
+)
+
+# ``sudo <editor> <path>``: the operator is editing a privileged file
+# interactively. ``ssh_sudo_edit`` (structured replace) is the better
+# tool surface.
+_SUDO_EDITOR_RE = re.compile(r"^\s*(?:vi|vim|nano|emacs|ed)\s+(?P<path>\S+)\s*$")
+
+
+# Read commands -> non-sudo wrapper choice (plain / redacted variant
+# decided per-call by ``_suggest_read_tool`` against redact_paths_globs).
+_READ_PLAIN_TOOL = "ssh_sftp_download"
+_READ_REDACTED_TOOL = "ssh_read_redacted"
+_SUDO_READ_PLAIN_TOOL = "ssh_sudo_read"
+_SUDO_READ_REDACTED_TOOL = "ssh_sudo_read_redacted"
+
+
+# ---------------------------------------------------------------------------
 # Docker subcommand -> suggested wrapper mapping. Best-effort; falls back
 # to the generic "ssh_docker_* family" hint when we can't cheaply parse.
 # ---------------------------------------------------------------------------
@@ -232,6 +311,51 @@ def _is_composite(command: str) -> bool:
     return any(tok in command for tok in _COMPOSITE_TOKENS)
 
 
+def _suggest_read_tool(
+    path: str | None,
+    *,
+    sudo: bool,
+    policy: HostPolicy | None,
+    settings: Settings | None,
+) -> tuple[str, bool]:
+    """Pick the right read-wrapper for a single-file read pattern.
+
+    Returns ``(suggested_tool, hit_redact_globs)``. When ``path`` is
+    unambiguously extractable AND the caller supplied a ``policy`` +
+    ``settings``, we glob-match the path against
+    ``redact_paths_globs``; a hit routes to the ``_redacted`` variant.
+
+    Caveat: the path comes from the raw command string, not from
+    ``realpath`` -- doing a remote canonicalization at cheatsheet-time
+    would force an SSH call before the precheck even completes. Globs
+    are typically operator-set against the SAME path shapes the LLM
+    types (``/opt/app/.env``, ``**/.env``), so the raw match is the
+    common case. Operators who set redact globs against canonical
+    paths the LLM never references will see the plain tool suggested
+    here -- still correct, just less specific.
+
+    When ``path is None`` (extraction failed because the shape is
+    ambiguous) or ``policy``/``settings`` were not threaded through,
+    we fall back to the plain variant. The human_explanation surfaces
+    both alternatives in that case.
+    """
+    # Choose the family up front -- sudo-tier vs plain.
+    plain = _SUDO_READ_PLAIN_TOOL if sudo else _READ_PLAIN_TOOL
+    redacted = _SUDO_READ_REDACTED_TOOL if sudo else _READ_REDACTED_TOOL
+    if path is None or policy is None or settings is None:
+        return plain, False
+    # Local import: redact_policy depends on Settings/HostPolicy which we
+    # already type-check under TYPE_CHECKING; runtime import stays
+    # call-site-local to mirror the cheatsheet_precheck audit-coupling
+    # pattern.
+    from .redact_policy import path_matches_redact_globs, resolve_redact_paths_globs
+
+    globs = resolve_redact_paths_globs(policy, settings)
+    if path_matches_redact_globs(path, globs, platform=policy.platform):
+        return redacted, True
+    return plain, False
+
+
 def _redirect_target_is_real_file(command: str) -> str | None:
     """Return a non-``/dev/null`` redirect target, or ``None``.
 
@@ -251,26 +375,201 @@ def _redirect_target_is_real_file(command: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def match_cheatsheet(command: str) -> CheatsheetMatch | None:
-    """Match ``command`` against the seven cheatsheet pattern classes.
+def _match_sudo_inner(
+    inner: str,
+    policy: HostPolicy | None,
+    settings: Settings | None,
+) -> CheatsheetMatch | None:
+    """Match the body of a ``sudo <flags> <inner>`` command.
+
+    Returns a :class:`CheatsheetMatch` for sudo-tier read / write / edit /
+    list shapes, or ``None`` when the inner shape doesn't match any
+    sudo-specific pattern (caller falls through to the regular
+    matcher; that's how ``sudo docker ps`` still hits the docker
+    pattern). ``_is_composite`` is applied per-shape so ``sudo cat /etc/foo
+    | grep ...`` still passes through as legitimate exec-tier shell.
+    """
+    # Read shapes -> ssh_sudo_read / ssh_sudo_read_redacted.
+    m_read = _READ_SINGLE_RE.match(inner)
+    if m_read is not None and not _is_composite(inner):
+        path = m_read.group("path")
+        suggested, hit_redact = _suggest_read_tool(path, sudo=True, policy=policy, settings=settings)
+        explanation = (
+            "sudo read of a path matching redact_paths_globs; "
+            "ssh_sudo_read_redacted is the intended alternative."
+            if hit_redact
+            else "sudo single-file read; ssh_sudo_read is path-policy-checked and audited."
+        )
+        return CheatsheetMatch(
+            pattern_id="sudo-read-single",
+            suggested_tool=suggested,
+            human_explanation=explanation,
+        )
+    # Ambiguous read shapes still get rejected -- but to the sudo-tier
+    # generic tool so the LLM doesn't switch off sudo just to comply.
+    m_ambig = _READ_AMBIGUOUS_RE.match(inner)
+    if m_ambig is not None and not _is_composite(inner):
+        return CheatsheetMatch(
+            pattern_id="sudo-read-single",
+            suggested_tool=_SUDO_READ_PLAIN_TOOL,
+            human_explanation=(
+                f"sudo `{m_ambig.group('cmd')}` -- path extraction refused. "
+                "Use ssh_sudo_read for sudo-elevated single-file reads, or "
+                "ssh_sudo_read_redacted for secret-bearing paths."
+            ),
+        )
+    # ``sudo tee <path>`` -> ssh_sudo_write.
+    m_tee = _SUDO_TEE_RE.match(inner)
+    if m_tee is not None and not _is_composite(inner):
+        return CheatsheetMatch(
+            pattern_id="sudo-write-single",
+            suggested_tool="ssh_sudo_write",
+            human_explanation=(
+                "sudo tee redirect is a privileged file write; ssh_sudo_write "
+                "is atomic, path-policy-checked, and preserves ownership."
+            ),
+        )
+    # ``sudo sh -c 'cat > /path'`` -> ssh_sudo_write.
+    m_shc = _SUDO_SH_C_CAT_RE.match(inner)
+    if m_shc is not None:
+        return CheatsheetMatch(
+            pattern_id="sudo-write-single",
+            suggested_tool="ssh_sudo_write",
+            human_explanation=(
+                "sudo heredoc-style write; ssh_sudo_write delivers the same "
+                "result atomically, with path-policy checks and audit."
+            ),
+        )
+    # ``sudo vi|vim|nano|emacs|ed <path>`` -> ssh_sudo_edit.
+    m_edit = _SUDO_EDITOR_RE.match(inner)
+    if m_edit is not None and not _is_composite(inner):
+        return CheatsheetMatch(
+            pattern_id="sudo-edit-single",
+            suggested_tool="ssh_sudo_edit",
+            human_explanation=(
+                "Interactive editor under sudo is not feasible over the MCP "
+                "channel; ssh_sudo_edit does a structured atomic replace."
+            ),
+        )
+    # ``sudo ls <path>`` -> ssh_sudo_sftp_list.
+    m_ls = _LIST_SINGLE_RE.match(inner)
+    if m_ls is not None and not _is_composite(inner):
+        return CheatsheetMatch(
+            pattern_id="sudo-list-single",
+            suggested_tool="ssh_sudo_sftp_list",
+            human_explanation=(
+                "sudo directory listing; ssh_sudo_sftp_list is path-policy-checked "
+                "and returns typed entries."
+            ),
+        )
+    return None
+
+
+def match_cheatsheet(
+    command: str,
+    *,
+    policy: HostPolicy | None = None,
+    settings: Settings | None = None,
+) -> CheatsheetMatch | None:
+    """Match ``command`` against the cheatsheet pattern classes.
 
     Returns the first matching :class:`CheatsheetMatch`, or ``None`` if the
     command looks like legitimate exec-tier shell. Empty / whitespace-only
     commands return ``None`` (``check_command`` will reject them later as
     "command is empty").
 
+    ``policy`` + ``settings`` (v1.4.0) enable the path-aware suggestion
+    for single-file read patterns: when a path is unambiguously extractable
+    from the command and it matches ``redact_paths_globs``, the suggestion
+    routes to the ``_redacted`` variant. Omit both to keep the match
+    path-agnostic (the existing behavior for callers that have no policy
+    handy).
+
     Order of patterns:
-      1. ``docker`` -- catch any leading ``docker`` first; the wrappers cover
+      1. Sudo-prefix variants (v1.4.0): sudo cat / head / tail / less /
+         ... / tee / sh -c 'cat > ...' / vi / vim / nano / emacs / ed /
+         ls. The inner shape decides the suggestion.
+      2. Single-file read shapes: cat / head / tail / less / more /
+         view / xxd / od / strings / wc.
+      3. Ambiguous-path read shapes: awk / sed / grep / file -- path
+         extraction refused, path-agnostic fallback.
+      4. Single-path ``ls`` listing.
+      5. ``docker`` -- catch any leading ``docker`` first; the wrappers cover
          ~22 tools.
-      2. ``systemctl <verb>`` for the 16 wrapper-covered verbs.
-      3. ``journalctl`` -- single wrapper, broad regex.
-      4. ``apt`` / ``apt-get`` mutation verbs.
-      5. Heredoc / tee / echo>/printf> file-writes.
-      6. Single-statement ``mkdir`` / ``cp`` / ``mv`` / ``rm`` (composite-safe).
-      7. Generic output redirection to a real file (``> /dev/null`` excluded).
+      6. ``systemctl <verb>`` for the 16 wrapper-covered verbs.
+      7. ``journalctl`` -- single wrapper, broad regex.
+      8. ``apt`` / ``apt-get`` mutation verbs.
+      9. Heredoc / tee / echo>/printf> file-writes.
+      10. Single-statement ``mkdir`` / ``cp`` / ``mv`` / ``rm`` (composite-safe).
+      11. Generic output redirection to a real file (``> /dev/null`` excluded).
     """
     if not command or not command.strip():
         return None
+
+    # 0. Sudo-prefix: strip the leading sudo and route to the inner
+    # matcher path-aware variants. If no sudo-specific shape matches,
+    # recurse on the inner command so ``sudo docker ps`` still hits the
+    # docker pattern (a legitimate use of sudo for docker on hardened
+    # hosts where the ssh-user isn't in the docker group).
+    m_sudo = _SUDO_PREFIX_RE.match(command)
+    if m_sudo is not None:
+        inner = m_sudo.group("rest")
+        sudo_match = _match_sudo_inner(inner, policy, settings)
+        if sudo_match is not None:
+            return sudo_match
+        # Recurse on inner: the regular docker / systemctl / journalctl /
+        # apt / heredoc / single-fileop / output-redirect patterns expect
+        # the command to start with the verb, not with "sudo". The
+        # recursion is bounded -- _SUDO_PREFIX_RE requires "sudo <flags>
+        # <something>", so once the prefix is gone the next call cannot
+        # match _SUDO_PREFIX_RE again unless the operator wrote
+        # ``sudo sudo cmd`` which is itself worth flagging at the
+        # downstream layer.
+        inner_match = match_cheatsheet(inner, policy=policy, settings=settings)
+        if inner_match is not None:
+            return inner_match
+
+    # 1. Single-file read (non-sudo). Path-aware.
+    m_read = _READ_SINGLE_RE.match(command)
+    if m_read is not None and not _is_composite(command):
+        path = m_read.group("path")
+        suggested, hit_redact = _suggest_read_tool(path, sudo=False, policy=policy, settings=settings)
+        explanation = (
+            "path matches redact_paths_globs; the redacted variant is the " "intended alternative."
+            if hit_redact
+            else "single-file read; the SFTP-backed tool is path-policy-checked and audited."
+        )
+        return CheatsheetMatch(
+            pattern_id="read-single",
+            suggested_tool=suggested,
+            human_explanation=explanation,
+        )
+
+    # 2. Ambiguous read shape -- refuse path extraction, generic fallback.
+    m_ambig = _READ_AMBIGUOUS_RE.match(command)
+    if m_ambig is not None and not _is_composite(command):
+        return CheatsheetMatch(
+            pattern_id="read-ambiguous",
+            suggested_tool=_READ_PLAIN_TOOL,
+            human_explanation=(
+                f"`{m_ambig.group('cmd')}` takes flags / expressions / multiple files; "
+                "the cheatsheet cannot extract a single path. Use ssh_sftp_download "
+                "for reads, ssh_read_redacted for secret-bearing paths, and the "
+                "structured tools (ssh_find, ssh_edit) for search / edit."
+            ),
+        )
+
+    # 3. ``ls <path>`` listing (no redaction routing -- ls is directory-level).
+    m_ls = _LIST_SINGLE_RE.match(command)
+    if m_ls is not None and not _is_composite(command):
+        return CheatsheetMatch(
+            pattern_id="list-single",
+            suggested_tool="ssh_sftp_list",
+            human_explanation=(
+                "Single-path `ls` listing; ssh_sftp_list is path-policy-checked, "
+                "paginated, and returns typed entries."
+            ),
+        )
 
     # 1. Docker.
     if _DOCKER_RE.match(command):
@@ -414,6 +713,8 @@ def cheatsheet_precheck(
     allow_cheatsheet: bool,
     *,
     tool_name: str,
+    policy: HostPolicy | None = None,
+    settings: Settings | None = None,
 ) -> CheatsheetMatch | None:
     """Compute the cheatsheet match unconditionally; raise only if the
     operator hasn't opted out.
@@ -434,7 +735,7 @@ def cheatsheet_precheck(
     grep ``jq 'select(.cheatsheet_pattern_id)'`` to count opt-out abuse
     by pattern without standing up a separate counter / dashboard.
     """
-    match = match_cheatsheet(command) if command else None
+    match = match_cheatsheet(command, policy=policy, settings=settings) if command else None
     if match is not None:
         if not allow_cheatsheet:
             raise CommandIsCheatsheetMatch(

@@ -123,6 +123,11 @@ ssh_file_hash(host="web01", path="/usr/local/bin/my-agent", algorithm="sha256")
     `minisign`. See [`runbooks/ssh-verify-signature/SKILL.md`](../../runbooks/ssh-verify-signature/SKILL.md)
     for the runbook.
 
+## Redaction policy
+
+This tool is subject to `redact_bypass_policy` when the path matches
+`redact_paths_globs`; see [`ssh_read_redacted`](../ssh-read-redacted/SKILL.md).
+
 ## Related
 
 - [`ssh_upload`](../ssh-upload/SKILL.md) -- what you typically hash after

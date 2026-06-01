@@ -15,6 +15,11 @@ import time
 from typing import TYPE_CHECKING
 
 import asyncssh
+
+# Import FX_NO_SUCH_FILE from ``asyncssh.constants`` rather than
+# ``asyncssh.sftp`` — the latter doesn't list it in ``__all__`` even though
+# it's the documented public surface, which trips mypy strict.
+from asyncssh.constants import FX_NO_SUCH_FILE
 from fastmcp import Context
 
 from ..app import mcp_server
@@ -299,7 +304,7 @@ async def ssh_transfer(
             try:
                 await dst_sftp.stat(dst_canonical)
             except asyncssh.SFTPError as exc:
-                if getattr(exc, "code", None) != asyncssh.sftp.FX_NO_SUCH_FILE:
+                if getattr(exc, "code", None) != FX_NO_SUCH_FILE:
                     raise
             else:
                 raise ValueError(

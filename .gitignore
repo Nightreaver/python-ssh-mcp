@@ -14,10 +14,7 @@ build/
 .coverage
 htmlcov/
 analyze/
-# Local agent-config files -- never committed.
 .claude
-CLAUDE.md
-AGENTS.md
 .mcp.json
 hosts.toml
 hosts-e2e.toml

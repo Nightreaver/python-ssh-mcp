@@ -89,3 +89,5 @@ ssh_edit(
   in `ssh_upload` to push a large replacement without base64 encoding.
 - [`ssh_cp`](../ssh-cp/SKILL.md) -- take a backup first if you want a manual rollback.
 - [`ssh_sftp_download`](../ssh-sftp-download/SKILL.md) -- read current contents to construct `old_string`.
+- [`ssh_sudo_edit`](../ssh-sudo-edit/SKILL.md) -- sudo-elevated equivalent;
+  preserves both ownership AND mode (security-critical for 0o600 secrets files).

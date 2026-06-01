@@ -61,6 +61,58 @@ class PathRestricted(SSHMCPError):
     """
 
 
+class RedactBypassBlocked(SSHMCPError):
+    """A path-bearing tool tried to deliver raw content for a path that
+    matches ``redact_paths_globs`` while ``redact_bypass_policy = "block"``.
+
+    From the LLM's perspective this looks like a :class:`PathRestricted`
+    refusal -- but the message explicitly points at ``ssh_read_redacted``
+    as the right alternative. The redact-globs list marks paths whose
+    contents the operator deems sensitive enough that ANY raw delivery
+    (download, hash-over-bytes-the-LLM-sees, find-then-cat dance) needs
+    to route through the redactor first.
+
+    Attributes
+    ----------
+    path : str
+        Canonical remote path that triggered the block.
+    suggested_tool : str
+        Tool the caller should use instead. Always ``"ssh_read_redacted"``
+        today but kept structured so future alternatives (e.g. a streaming
+        variant) can be surfaced without parsing the message.
+    """
+
+    def __init__(self, path: str, *, suggested_tool: str = "ssh_read_redacted") -> None:
+        super().__init__(
+            f"path {path!r} matches a redact-list glob; raw delivery is blocked "
+            f"by redact_bypass_policy='block'. Use {suggested_tool}(host, path) "
+            "to read a redacted view, or ask the operator to switch the host "
+            "to redact_bypass_policy='warn' / 'audit_only' if raw access is "
+            "really needed."
+        )
+        self.path = path
+        self.suggested_tool = suggested_tool
+
+
+class SudoFileOpError(SSHMCPError):
+    """Sudo-tier file pipeline (``services.sudo_file_ops``) failed.
+
+    Raised by :mod:`ssh_mcp.services.sudo_file_ops` helpers when the
+    ``sudo cat`` / ``sudo stat`` / ``sudo sh -c '...mktemp...mv...'`` /
+    ``sudo ls`` invocation returns a non-zero exit, when the SFTP-side
+    cap (``SSH_UPLOAD_MAX_FILE_BYTES`` for reads,
+    ``SSH_EDIT_MAX_FILE_BYTES`` for sudo edits) is exceeded, or when the
+    parsed output (``ls -la`` row, ``stat`` owner string) is malformed.
+
+    Distinct from :class:`PathRestricted` / :class:`PathNotAllowed`: those
+    fire in :func:`ssh_mcp.services.path_policy.resolve_path` BEFORE the
+    sudo pipeline runs. By the time a ``SudoFileOpError`` is raised the
+    path passed the policy check and the failure is downstream -- sudo
+    refused, the target wasn't readable even via sudo, the file was
+    larger than the cap, or our parser couldn't read the response.
+    """
+
+
 class LocalPathPolicyError(SSHMCPError):
     """A `local_path=` argument failed the MCP-host filesystem allowlist check.
 

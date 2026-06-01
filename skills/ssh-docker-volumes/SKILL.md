@@ -88,6 +88,10 @@ print(info["Mountpoint"], info["CreatedAt"], info.get("UsageData"))
   image / network / volume in one tool. `ssh_docker_volumes(name=...)`
   is equivalent to `ssh_docker_inspect(target=..., kind="volume")`; the
   dedicated tool exists because the ls variant is the primary use case.
+- [`ssh_docker_system_df`](../ssh-docker-system-df/SKILL.md) -- category
+  rollup (Images / Containers / Volumes / Build Cache) with reclaimable
+  estimates. Faster than this tool for "are volumes the bloat?" triage;
+  fall through to this tool once you know the answer is yes.
 - [`ssh_docker_prune`](../ssh-docker-prune/SKILL.md) -- mutating;
   `scope="volume"` deletes data. Always list volumes first.
 - [`runbooks/ssh-docker-incident-response/`](../../runbooks/ssh-docker-incident-response/SKILL.md)

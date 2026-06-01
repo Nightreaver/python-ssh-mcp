@@ -13,6 +13,11 @@ import stat as stat_module
 from typing import Any
 
 import asyncssh
+
+# Import the SFTP FX_* status codes from ``asyncssh.constants`` rather than
+# ``asyncssh.sftp`` — the latter doesn't list them in ``__all__`` even though
+# they're the documented public surface for SFTPError.code comparisons.
+from asyncssh.constants import FX_FAILURE, FX_LINK_LOOP, FX_OP_UNSUPPORTED
 from fastmcp import Context
 
 from ...app import mcp_server
@@ -26,6 +31,7 @@ from ...services.path_policy import (
 from .._context import require_posix, resolve_host
 from ._helpers import (
     WriteError,
+    _bypass_warnings,
     _is_missing,
     _prepare_creatable,
     _prepare_existing,
@@ -44,7 +50,8 @@ async def ssh_mkdir(
     mode: int = 0o755,
 ) -> WriteResult:
     """Create a directory. With `parents=True`, behave like `mkdir -p`."""
-    pool, policy, _settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
+    pool, policy, settings, _conn, canonical = await _prepare_creatable(ctx, host, path)
+    warnings = _bypass_warnings(canonical, policy, settings)
     async with pool.sftp_policy(policy) as sftp:
         if parents:
             await _mkdir_p(sftp, canonical, mode)
@@ -55,6 +62,7 @@ async def ssh_mkdir(
         path=canonical,
         success=True,
         message="created" if not parents else "created (with parents)",
+        output_warnings=warnings,
     )
 
 
@@ -83,13 +91,20 @@ async def _mkdir_p(sftp: asyncssh.SFTPClient, canonical: str, mode: int) -> None
 @audited(tier="low-access")
 async def ssh_delete(host: str, path: str, ctx: Context) -> WriteResult:
     """Delete a single file. Rejects directories — use ssh_delete_folder."""
-    pool, policy, _settings, _conn, canonical = await _prepare_existing(ctx, host, path)
+    pool, policy, settings, _conn, canonical = await _prepare_existing(ctx, host, path)
+    warnings = _bypass_warnings(canonical, policy, settings)
     async with pool.sftp_policy(policy) as sftp:
         attrs = await sftp.lstat(canonical)
         if stat_module.S_ISDIR(attrs.permissions or 0):
             raise WriteError(f"{canonical!r} is a directory; use ssh_delete_folder")
         await sftp.remove(canonical)
-    return WriteResult(host=policy.hostname, path=canonical, success=True, message="deleted")
+    return WriteResult(
+        host=policy.hostname,
+        path=canonical,
+        success=True,
+        message="deleted",
+        output_warnings=warnings,
+    )
 
 
 # --------- ssh_delete_folder ---------
@@ -111,6 +126,7 @@ async def ssh_delete_folder(
     `dry_run=True` returns what would be deleted without touching anything.
     """
     pool, policy, settings, conn, canonical = await _prepare_existing(ctx, host, path)
+    warnings = _bypass_warnings(canonical, policy, settings)
     cap = settings.SSH_DELETE_FOLDER_MAX_ENTRIES
     async with pool.sftp_policy(policy) as sftp:
         if not recursive:
@@ -120,10 +136,15 @@ async def ssh_delete_folder(
                     "path": canonical,
                     "would_delete": [canonical],
                     "dry_run": True,
+                    "output_warnings": warnings,
                 }
             await sftp.rmdir(canonical)
             return WriteResult(
-                host=policy.hostname, path=canonical, success=True, message="rmdir"
+                host=policy.hostname,
+                path=canonical,
+                success=True,
+                message="rmdir",
+                output_warnings=warnings,
             ).model_dump()
 
         entries = await _walk_tree(sftp, canonical, cap)
@@ -136,6 +157,7 @@ async def ssh_delete_folder(
                 "path": canonical,
                 "would_delete": entries,
                 "dry_run": True,
+                "output_warnings": warnings,
             }
 
     # Re-validate against allowlist (defense in depth) before shelling out
@@ -172,6 +194,7 @@ async def ssh_delete_folder(
             path=canonical,
             success=True,
             message=f"recursively deleted {len(entries)} entries (SFTP)",
+            output_warnings=warnings,
         ).model_dump()
 
     result = await conn.run(shlex.join(["rm", "-rf", "--", canonical]), check=False)
@@ -179,12 +202,13 @@ async def ssh_delete_folder(
         stderr = result.stderr
         if isinstance(stderr, bytes | bytearray):
             stderr = stderr.decode(errors="replace")
-        raise WriteError(f"rm -rf failed (exit {result.exit_status}): {stderr.strip()}")
+        raise WriteError(f"rm -rf failed (exit {result.exit_status}): {(stderr or '').strip()}")
     return WriteResult(
         host=policy.hostname,
         path=canonical,
         success=True,
         message=f"recursively deleted {len(entries)} entries",
+        output_warnings=warnings,
     ).model_dump()
 
 
@@ -228,6 +252,17 @@ async def ssh_cp(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
     require_posix(resolved, tool="ssh_cp", reason="uses `cp -a`; no cross-platform equivalent wired yet")
     pool, policy, settings, conn, src_canonical = await _prepare_existing(ctx, host, src)
     dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False, pool=pool)
+    # Redact-bypass: warn on either side if it matches the redact-list (a
+    # mv from a redact-listed path leaks the bytes the same as a download
+    # would; a mv to a redact-listed path is the operator's concern but
+    # we don't second-guess them). Dedup so the message doesn't double up
+    # when both src and dst match the same glob.
+    cp_warnings = list(
+        {
+            *_bypass_warnings(src_canonical, policy, settings),
+            *_bypass_warnings(dst_canonical, policy, settings),
+        }
+    )
 
     # Capture src size BEFORE the copy so ``bytes_written`` surfaces a
     # meaningful number on the result. The pre-copy stat is cheap (one
@@ -252,13 +287,14 @@ async def ssh_cp(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
         stderr = result.stderr
         if isinstance(stderr, bytes | bytearray):
             stderr = stderr.decode(errors="replace")
-        raise WriteError(f"cp failed (exit {result.exit_status}): {stderr.strip()}")
+        raise WriteError(f"cp failed (exit {result.exit_status}): {(stderr or '').strip()}")
     return WriteResult(
         host=policy.hostname,
         path=dst_canonical,
         success=True,
         bytes_written=src_size,
         message=f"copied from {src_canonical}",
+        output_warnings=cp_warnings,
     )
 
 
@@ -276,6 +312,12 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
     """
     pool, policy, settings, conn, src_canonical = await _prepare_existing(ctx, host, src)
     dst_canonical = await resolve_path(conn, dst, policy, settings, must_exist=False, pool=pool)
+    mv_warnings = list(
+        {
+            *_bypass_warnings(src_canonical, policy, settings),
+            *_bypass_warnings(dst_canonical, policy, settings),
+        }
+    )
 
     # Pre-capture src size for ``bytes_written``. Same-fs rename writes
     # nothing on disk, but operators reading the result still want a
@@ -307,7 +349,9 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
                     stderr = result.stderr
                     if isinstance(stderr, bytes | bytearray):
                         stderr = stderr.decode(errors="replace")
-                    raise WriteError(f"mv failed (exit {result.exit_status}): {stderr.strip()}") from exc
+                    raise WriteError(
+                        f"mv failed (exit {result.exit_status}): {(stderr or '').strip()}"
+                    ) from exc
                 mode = "mv-fallback"
             else:
                 raise
@@ -318,6 +362,7 @@ async def ssh_mv(host: str, src: str, dst: str, ctx: Context) -> WriteResult:
         success=True,
         bytes_written=src_size,
         message=f"moved from {src_canonical} ({mode})",
+        output_warnings=mv_warnings,
     )
 
 
@@ -327,7 +372,7 @@ def _is_cross_device(exc: asyncssh.SFTPError) -> bool:
     # fallback will produce a cleaner error on any non-EXDEV reason.
     code = getattr(exc, "code", None)
     return code in {
-        asyncssh.sftp.FX_FAILURE,
-        asyncssh.sftp.FX_OP_UNSUPPORTED,
-        asyncssh.sftp.FX_LINK_LOOP,
+        FX_FAILURE,
+        FX_OP_UNSUPPORTED,
+        FX_LINK_LOOP,
     }

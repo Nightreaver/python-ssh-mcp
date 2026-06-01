@@ -90,6 +90,7 @@ from .docker.read_tools import (
     ssh_docker_logs,
     ssh_docker_ps,
     ssh_docker_stats,
+    ssh_docker_system_df,
     ssh_docker_top,
     ssh_docker_volumes,
 )
@@ -120,6 +121,7 @@ __all__ = [
     "ssh_docker_start",
     "ssh_docker_stats",
     "ssh_docker_stop",
+    "ssh_docker_system_df",
     "ssh_docker_top",
     "ssh_docker_volumes",
 ]

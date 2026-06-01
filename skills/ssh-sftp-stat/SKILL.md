@@ -58,6 +58,11 @@ ssh_sftp_stat(host="web01", path="/etc/nginx/nginx.conf")
 - SFTP "no such file" -> tool error; the path doesn't exist (or you can't see it).
 - "permission denied" -> the SSH user can't `stat` that path.
 
+## Redaction policy
+
+This tool is subject to `redact_bypass_policy` when the path matches
+`redact_paths_globs`; see [`ssh_read_redacted`](../ssh-read-redacted/SKILL.md).
+
 ## Related
 
 - [`ssh_sftp_list`](../ssh-sftp-list/SKILL.md) -- directory enumeration.

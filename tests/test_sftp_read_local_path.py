@@ -1,4 +1,4 @@
-"""ssh_sftp_download `local_path` mode (v1.3.0).
+"""ssh_sftp_download `local_path` mode (v1.10.0).
 
 The MCP server streams the remote file directly onto its OWN filesystem
 instead of base64-encoding it through the MCP JSON channel. Covers:

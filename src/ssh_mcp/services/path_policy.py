@@ -38,11 +38,12 @@ import logging
 import ntpath
 import posixpath
 import shlex
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
 import asyncssh
 
-from ..ssh.errors import PathNotAllowed, PathRestricted
+from ..ssh.errors import PathNotAllowed, PathRestricted, RedactBypassBlocked
 from ..telemetry import span
 
 logger = logging.getLogger(__name__)
@@ -116,25 +117,45 @@ def _prefix_match(canonical: str, root: str, platform: Platform) -> bool:
     return c == r or c.startswith(r + "/")
 
 
-def check_not_restricted(canonical: str, restricted: list[str], platform: Platform = "posix") -> None:
-    """Raise ``PathRestricted`` if ``canonical`` is inside any restricted root.
+def check_not_restricted(
+    canonical: str,
+    restricted: list[str],
+    platform: Platform = "posix",
+    restricted_globs: list[str] | None = None,
+) -> None:
+    """Raise ``PathRestricted`` if ``canonical`` is inside any restricted root
+    OR matches any glob in ``restricted_globs`` (v1.4.0).
 
     Prefix semantics identical to ``check_in_allowlist`` (i.e. ``/mnt/shared``
     as a restricted root rejects ``/mnt/shared`` itself and ``/mnt/shared/**``).
     No wildcard sentinels: ``"*"`` as a restricted entry would disable the
     entire low-access + sftp-read tiers on the host; if that's the intent,
     turn the tier flag off instead.
+
+    ``restricted_globs`` are matched via ``pathlib.PurePosixPath.match`` (or
+    ``PureWindowsPath.match`` on Windows hosts). Empty / None => glob check
+    is skipped entirely. The two lists are UNIONED on the deny side, prefix
+    semantics for ``restricted`` and glob semantics for ``restricted_globs``.
     """
-    if not restricted:
-        return
-    for root in restricted:
-        if _prefix_match(canonical, root, platform):
-            raise PathRestricted(
-                f"path {canonical!r} is inside restricted zone {root!r}; "
-                f"low-access and sftp-read tools refuse restricted paths. Use "
-                f"ssh_exec_run / ssh_sudo_exec (requires ALLOW_DANGEROUS_TOOLS) "
-                f"if you really need to touch this path."
-            )
+    if restricted:
+        for root in restricted:
+            if _prefix_match(canonical, root, platform):
+                raise PathRestricted(
+                    f"path {canonical!r} is inside restricted zone {root!r}; "
+                    f"low-access and sftp-read tools refuse restricted paths. Use "
+                    f"ssh_exec_run / ssh_sudo_exec (requires ALLOW_DANGEROUS_TOOLS) "
+                    f"if you really need to touch this path."
+                )
+    if restricted_globs:
+        path_obj: PurePosixPath | PureWindowsPath = (
+            PureWindowsPath(canonical) if platform == "windows" else PurePosixPath(canonical)
+        )
+        for glob in restricted_globs:
+            if path_obj.match(glob):
+                raise PathRestricted(
+                    f"path {canonical!r} matches restricted glob {glob!r}; "
+                    f"low-access and sftp-read tools refuse restricted paths."
+                )
 
 
 _ALLOW_ALL_SENTINELS = frozenset({"*", "/"})
@@ -519,7 +540,22 @@ async def resolve_path(
     uses the pool's cached SFTPClient instead of opening a fresh channel
     per call. POSIX targets ignore it. Callers in SFTP-heavy paths
     (low_access_tools, sftp_read_tools, multi_host_tools) should pass it.
+
+    v1.4.0: also enforces ``restricted_globs`` (glob-aware deny list,
+    unioned with ``restricted_paths``) and the ``redact_bypass_policy=block``
+    case for ``redact_paths_globs``. The bypass-block raises
+    :class:`RedactBypassBlocked` -- the LLM sees an error that names
+    ``ssh_read_redacted`` as the right alternative. ``warn`` and
+    ``audit_only`` modes do NOT raise here; callers consult
+    :func:`ssh_mcp.services.redact_policy.check_redact_bypass` after
+    ``resolve_path`` returns and attach the appropriate side effect.
     """
+    # Local import: redact_policy depends on Settings/HostPolicy which this
+    # module already imports under TYPE_CHECKING. A top-level import would
+    # work but the redact layer is logically a layer ABOVE path_policy,
+    # so we keep the runtime coupling explicit.
+    from .redact_policy import resolve_restricted_globs, should_block_redact_bypass
+
     canonical = await canonicalize_and_check(
         conn,
         path,
@@ -533,5 +569,46 @@ async def resolve_path(
         canonical,
         effective_restricted_paths(policy, settings),
         policy.platform,
+        restricted_globs=resolve_restricted_globs(policy, settings),
+    )
+    if should_block_redact_bypass(canonical, policy, settings):
+        raise RedactBypassBlocked(canonical)
+    return canonical
+
+
+async def resolve_path_for_redacted_read(
+    conn: asyncssh.SSHClientConnection,
+    path: str,
+    policy: HostPolicy,
+    settings: Settings,
+    *,
+    must_exist: bool = True,
+    pool: ConnectionPool | None = None,
+) -> str:
+    """Like :func:`resolve_path` but the redact-bypass BLOCK does not fire
+    -- this is the entry point for ``ssh_read_redacted``, which IS the
+    operator-blessed way to read a redact-listed file.
+
+    Still enforces the standard allowlist + ``restricted_paths`` + the new
+    ``restricted_globs`` (the deny list is independent of the redact list;
+    a path that's hard-denied stays denied even from the redactor). Only
+    the ``redact_paths_globs`` BLOCK is skipped, by design.
+    """
+    from .redact_policy import resolve_restricted_globs
+
+    canonical = await canonicalize_and_check(
+        conn,
+        path,
+        effective_allowlist(policy, settings),
+        must_exist=must_exist,
+        platform=policy.platform,
+        pool=pool,
+        policy=policy,
+    )
+    check_not_restricted(
+        canonical,
+        effective_restricted_paths(policy, settings),
+        policy.platform,
+        restricted_globs=resolve_restricted_globs(policy, settings),
     )
     return canonical

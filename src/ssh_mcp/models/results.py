@@ -86,6 +86,9 @@ class StatResult(BaseModel):
     owner: str | None = None
     group: str | None = None
     symlink_target: str | None = None
+    # v1.4.0: populated when the redact-bypass layer flags the path in
+    # ``warn`` mode. Empty in the common case.
+    output_warnings: list[str] = []
 
 
 class WriteResult(BaseModel):
@@ -93,10 +96,15 @@ class WriteResult(BaseModel):
     ssh_mkdir / ssh_cp / ssh_mv / ssh_link / ssh_edit / ssh_patch / ...).
 
     ``local_path_written`` is populated only when ``ssh_upload`` / ``ssh_deploy``
-    sourced its bytes from ``local_path=`` (v1.3.0). It carries the
+    sourced its bytes from ``local_path=`` (v1.10.0). It carries the
     canonical MCP-host path the bytes were read from, for the audit trail
     -- the LLM never saw the payload but the operator should be able to
     correlate the destination back to its local source.
+
+    v1.4.0: ``output_warnings`` added so the secret-redaction bypass layer
+    can attach a per-call warning when ``redact_bypass_policy="warn"`` lets
+    a redact-list path through. Same shape as ``ExecResult.output_warnings``
+    and ``DownloadResult.output_warnings``.
     """
 
     model_config = _RESULT_MODEL_CONFIG
@@ -107,6 +115,7 @@ class WriteResult(BaseModel):
     bytes_written: int = 0
     message: str | None = None
     local_path_written: str | None = None
+    output_warnings: list[str] = []
 
 
 class PingResult(BaseModel):
@@ -297,6 +306,9 @@ class SftpListResult(BaseModel):
     offset: int
     limit: int
     has_more: bool
+    # v1.4.0: populated when the redact-bypass layer flags the path in
+    # ``warn`` mode. Empty in the common case.
+    output_warnings: list[str] = []
 
 
 class FindResult(BaseModel):
@@ -306,6 +318,9 @@ class FindResult(BaseModel):
     root: str
     matches: list[str]
     truncated: bool
+    # v1.4.0: populated when the redact-bypass layer flags the search root
+    # in ``warn`` mode. Empty in the common case.
+    output_warnings: list[str] = []
 
 
 class DownloadResult(BaseModel):
@@ -317,7 +332,7 @@ class DownloadResult(BaseModel):
       channel as base64 in ``content_base64``. Subject to
       ``SSH_UPLOAD_MAX_FILE_BYTES`` (default 256 MiB); larger files come
       back with ``truncated=True`` and an empty payload.
-    - ``local_path=`` mode (v1.3.0): the MCP server streams the file
+    - ``local_path=`` mode (v1.10.0): the MCP server streams the file
       directly to disk at the caller-supplied local path.
       ``content_base64`` is empty, ``truncated`` is False, and
       ``local_path_written`` carries the canonical MCP-host path the
@@ -338,7 +353,7 @@ class DownloadResult(BaseModel):
     # text view should `sanitize()` after decoding. Empty for files
     # that look textually clean or aren't text at all.
     output_warnings: list[str] = []
-    # v1.3.0: populated only in `local_path` mode. Canonical MCP-host
+    # v1.10.0: populated only in `local_path` mode. Canonical MCP-host
     # absolute path the file was written to. None when the download went
     # back via the base64 channel.
     local_path_written: str | None = None
@@ -352,6 +367,70 @@ class HashResult(BaseModel):
     algorithm: str  # "md5" | "sha1" | "sha256" | "sha512"
     digest: str  # lowercase hex, no prefix
     size: int  # file size in bytes (-1 if unavailable)
+    # v1.4.0: populated when the redact-bypass layer flags the hashed path
+    # in ``warn`` mode -- a SHA over a secret file is the same as the SHA
+    # of the secret, so the warning helps the LLM know it just leaked an
+    # identifying fingerprint of the cleartext.
+    output_warnings: list[str] = []
+
+
+class RedactedReadResult(BaseModel):
+    """Outcome of ``ssh_read_redacted`` -- read a remote file and pass it
+    through the secret-redactor before delivering to the LLM.
+
+    Why a separate model: the LLM needs to know WHAT was redacted to
+    reason about the file's structure ("the DB_PASSWORD on line 4 maps
+    to hash abc123 -- the same hash I saw on the prod-app host, so the
+    secret is shared"). Embedding that as inline ``<sha:abc123>`` markers
+    in the content covers the comparison case; the ``redactions`` list
+    covers the structured case (don't make the LLM regex-parse its own
+    input back out).
+
+    Fields
+    ------
+    host : str
+        Canonical hostname (= policy.hostname after resolve).
+    path : str
+        Canonical remote path that was read.
+    size_original : int
+        File size in bytes BEFORE redaction. The redacted ``content`` can
+        be larger (markers tend to be longer than the secrets they
+        replace) so size of ``content`` is not a useful comparison point.
+    content : str
+        Redacted text. Always UTF-8 decoded (errors=replace) -- the tool
+        is intended for config files, not binary blobs.
+    format_detected : str
+        Which parser the redactor ran -- ``env`` / ``yaml`` / ``json`` /
+        ``ini`` / ``generic``. Mirrors the input ``format`` parameter
+        when set, else the auto-detected format from the extension.
+    redactions : list[dict]
+        One dict per redaction: ``{"key": "DB_PASSWORD" | None,
+        "hash": "abc123def456", "line": 4 | None, "kind":
+        "key_match" | "entropy_base64" | "entropy_hex" | "pem_block"}``.
+        Kept as ``dict`` rather than a nested model so the LLM gets a
+        flat JSON-shaped surface and we don't pay for an extra schema.
+    truncated : bool
+        True when the file's size exceeded ``SSH_UPLOAD_MAX_FILE_BYTES``
+        and the read was skipped. ``content`` is empty when this is True,
+        same pattern as ``DownloadResult.truncated``.
+    output_warnings : list[str]
+        Free-form warnings the tool wants the LLM to see. The redactor
+        attaches "no salt configured" when ``SSH_REDACT_SALT`` is empty
+        (the operator opted into plain-SHA256 mode, secrets are still
+        hashed but the hash is rainbow-tableable). Empty in the common
+        case.
+    """
+
+    model_config = _RESULT_MODEL_CONFIG
+
+    host: str
+    path: str
+    size_original: int
+    content: str
+    format_detected: str
+    redactions: list[dict[str, str | int | None]] = []
+    truncated: bool = False
+    output_warnings: list[str] = []
 
 
 class HostListEntry(BaseModel):

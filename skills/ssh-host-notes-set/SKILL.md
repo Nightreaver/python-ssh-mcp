@@ -62,14 +62,48 @@ half-written.
 
 ## Suggested consolidation pattern
 
+The end-state must conform to the **canonical sidecar structure**
+documented in
+[ssh_host_notes_append SKILL](../ssh-host-notes-append/SKILL.md) --
+At-a-glance / Platform quirks / Storage / Workloads / Open TODOs at the
+top, then the append-only Timeline at the bottom. The structured head
+is the part `_set` maintains; the Timeline preserves prior timestamped
+entries verbatim (you only prune stale ones).
+
 ```text
 1. notes = ssh_host_notes(host="web01")
-2. read notes.agent_notes; identify stale entries (about a feature
-   that's been removed; superseded by a later entry; etc.)
-3. compose a cleaned markdown body, structured by topic (Auth & users;
-   Service quirks; Deployment; Debugging hints), preserving every entry
-   that's still load-bearing.
+2. read notes.agent_notes; identify:
+   - stale TIMELINE entries (about a removed feature / superseded by a
+     later entry / one-off debugging notes that aged out)
+   - structural drift (At-a-glance still says kernel 6.1 but host is on
+     6.6 now; "Open TODOs" has items the operator confirmed completed)
+3. compose a cleaned markdown body in the canonical structure:
+   - update At-a-glance / Platform quirks / Storage / Workloads with
+     today's known state (each one-liner -- not a sprawl)
+   - tick done TODOs `- [x]`; drop very old done ones (>3 months); add
+     new actionable ones
+   - preserve every Timeline entry that's still load-bearing; drop only
+     entries fully superseded by a later one
 4. ssh_host_notes_set(host="web01", content=<cleaned body>)
+```
+
+## Initial setup pattern (first time on a host you'll work with)
+
+When you'll spend real time on a host, lay down the canonical skeleton
+on first contact instead of letting `ssh_host_notes_append` create the
+minimal-header bootstrap:
+
+```text
+1. ssh_host_ping(host="web01") -- agent_notes likely None on first contact
+2. gather facts via ssh_host_info / ssh_host_disk_usage / ssh_host_network /
+   ssh_host_processes / ssh_docker_ps / ssh_systemctl_list_units etc.
+3. compose a markdown body in the canonical structure with At-a-glance
+   filled in from those calls, Workloads from ps/docker_ps, your initial
+   TODOs (if any), and an empty Timeline section (or your first
+   timestamped entry already at the bottom).
+4. ssh_host_notes_set(host="web01", content=<skeleton with facts>)
+5. continue your work; record durable lessons via ssh_host_notes_append
+   -- they'll land in the Timeline section.
 ```
 
 Don't lose information you can't easily re-derive. When in doubt, keep.

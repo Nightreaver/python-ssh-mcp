@@ -9,10 +9,11 @@ Mtime-checked reload is called on every `fingerprint_for()` and every
 `as_asyncssh_param()` -- the fast path is a single `stat()` when unchanged;
 a full reparse only runs when the file genuinely moved.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import asyncssh
 
@@ -113,4 +114,7 @@ class KnownHosts:
         if not trusted:
             return None
         # Prefer the first match; multiple entries are rare in practice.
-        return trusted[0].get_fingerprint("sha256")
+        # asyncssh's SSHKey.get_fingerprint stubs return Any; we know it's a
+        # ``"SHA256:<b64>"`` string per the asyncssh docs, so cast for the
+        # declared ``str | None`` return type.
+        return cast("str", trusted[0].get_fingerprint("sha256"))

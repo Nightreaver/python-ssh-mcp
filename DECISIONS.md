@@ -340,3 +340,55 @@ As part of the same change, the list-valued env vars (`SSH_HOSTS_ALLOWLIST`, `SS
 6. **Symlink safety.** Read mode: strict-resolve (must exist + regular file). Write mode: strict-resolve of parent then canonical rebuild so symlinked parents are followed before the `is_relative_to` allowlist check.
 
 **Consequences:** Large artifact deploys and snapshot downloads no longer require the LLM to hold or generate multi-MB base64 strings. Operators must explicitly configure `SSH_LOCAL_TRANSFER_ROOTS` — the default is safe (disabled). The `local_path_written` field on `WriteResult` and `DownloadResult` provides an audit trail back to the source/destination path on the MCP host.
+
+---
+
+## ADR-0027 — Secret-redaction layer: separate tool + HMAC markers + three-list policy (v1.4.0)
+
+**Status:** Accepted (2026-05-30)
+
+**Context:** The LLM routinely reads production config files (`.env`, docker compose, app YAML) to understand service configuration. These files mix structural information (which keys exist, how they relate) with secret values (passwords, tokens, API keys). `ssh_sftp_download` returns the raw bytes, putting plaintext secrets into the LLM context window -- a privacy concern even when the LLM itself is trusted, since context can be logged, sampled, or inadvertently reproduced in outputs.
+
+**Decision:** Ship a separate `ssh_read_redacted` tool plus a three-list path policy. Key choices:
+
+1. **Separate tool, not auto-redaction in `ssh_sftp_download`.** Auto-redaction inside `ssh_sftp_download` would be silent and surprising -- operators who read non-secret files would get markers they didn't ask for, and the intent ("I want to read this safely") would be invisible in the audit log. A dedicated tool makes the LLM's decision explicit and auditable. The tool name itself appears in the audit line; `ssh_sftp_download` remains semantically "raw bytes."
+
+2. **HMAC-SHA256 with 12-character hex prefix.** A 12-char hex prefix is 48 bits of collision space -- more than adequate for any realistic secret set (even 100,000 unique secrets gives ~0.004% collision probability). At the same time, 12 hex chars is short enough that the inline marker `<sha:abcdef123456 len:48>` reads naturally and the LLM can copy it verbatim when cross-referencing across hosts. Brute-force reversal of the original secret requires breaking HMAC-SHA256 with an unknown salt, not just matching the short prefix.
+
+3. **Three-list distinction.** `restricted_paths` (prefix-deny), `restricted_globs` (glob-deny), and `redact_paths_globs` (bypass-policy route) serve different needs and must not collapse into one. `restricted_*` is a hard-deny regardless of what tool is used -- it defends against misconfigurations where the path allowlist is too wide. `redact_paths_globs` is a softer gate: the path is readable but only by `ssh_read_redacted`. Conflating them would force operators to choose between "totally blocked" and "raw bytes to LLM."
+
+4. **`block` is the recommended default for `redact_bypass_policy`.** Fail-closed: if the operator hasn't explicitly opted into `warn` or `audit_only`, other tools simply refuse with an error naming the alternative. `warn` is appropriate for dev where the operator trusts the LLM not to leak. `audit_only` is for deployments where the policy must be invisible to the LLM but tracked by SIEM.
+
+5. **Entropy detection on by default.** Key-name matching only catches known patterns. Scripts and compose files often carry base64-encoded secrets in values whose keys don't match `PASSWORD` or `TOKEN`. Default-on entropy detection (base64 >= 20 chars, hex >= 32 chars) catches the common shapes without operator configuration of every key. PEM blocks are always caught regardless of the toggle -- they are unambiguous private key / certificate material.
+
+6. **Anchor escape hatch in `_key_matches`.** Bare substring `PASS` would over-match `BYPASS_*` / `COMPASS_*` / `PASSTHROUGH`. The anchor syntax (`^PREFIX_`, `_SUFFIX$`, `^EXACT$`) lets the built-in list use `^PASS_` and `_PASS$` for the common `DB_PASS` / `PASS_HEADER` cases while staying clean on the false-positive classes. Operators can use the same anchors in `redact_keys_add`.
+
+**Consequences:** LLMs can reason about config file structure and compare secrets across hosts (same secret = same hash) without ever seeing plaintext. Operators gain a structured audit trail (`redact_bypass: true` on warn/audit_only) for SIEM. The raw-exec bypass gap (see INC-064) is a documented limitation, not a defect -- mitigation via `command_allowlist` is the correct layer.
+
+**References:** [services/redact_policy.py](src/ssh_mcp/services/redact_policy.py), [services/redactor.py](src/ssh_mcp/services/redactor.py), [tools/sftp_read_tools.py:ssh_read_redacted](src/ssh_mcp/tools/sftp_read_tools.py), [models/results.py:RedactedReadResult](src/ssh_mcp/models/results.py), INC-064.
+
+---
+
+## ADR-0028 -- Sudo-tier path-bearing tools + path-aware cheatsheet (v1.4.0)
+
+**Status:** Accepted (2026-05-30)
+
+**Context:** After the v1.4.0 redact-policy layer landed, a gap remained on production-hardened hosts where the SSH service account has minimal rights. On those hosts the SFTP-layer path policy (allowlist + restricted_paths + restricted_globs + redact_paths_globs) was de facto unreachable for root-owned files: the only sudo path was `ssh_sudo_exec("cat /etc/...")` which takes a command string, not a path argument, and has no structural hook to apply per-path policy. A root-owned `.env` at `/docker/app/.env` could be read via `ssh_sudo_exec cat /docker/app/.env` while `ssh_sftp_download` on the same path would be blocked by `redact_bypass_policy=block`.
+
+**Decision:** Ship five sudo-tier path-bearing tools that route through the same `resolve_path` / `resolve_path_for_redacted_read` policy chain as the SFTP-read tier. Key choices:
+
+1. **Five-tool scope (read + read_redacted + write + edit + list).** A three-tool partial set (read + write + list) would have left the "edit an existing privileged file" use-case on `ssh_sudo_exec` with a heredoc -- which is the exact bypass we are trying to close. All five are needed for a complete operator workflow.
+
+2. **Shell-script-body construction convention: inline operator values as shell variables.** The `sudo_atomic_write` helper constructs a `sudo sh -c '<script>'` body. The inner command becomes the body of an outer `sh -c <quoted_inner>` via `_run_sudo_bytes`. Trailing positional-arg tokens after the script body (`sh -c '<script>' _ <dest> <mode> <owner>`) are parsed as shell statements, not positional params -- this is the bug that surfaced on live runs as `sh: 1: Syntax error: word unexpected` at stage `cat>tmp`. Fix: inline values as shell variables (`dest=<quoted>; mode=<quoted>; owner=<quoted>`) at the top of the script body via `shlex.quote`, never as trailing positional args. Future shell-script helpers MUST use this pattern.
+
+3. **Path-aware cheatsheet hybrid.** When the command shape allows unambiguous single-path extraction (`cat <path>`, `head -n N <path>`, `ls <path>`), the rejection hint is path-aware: if the extracted path matches `redact_paths_globs`, the hint names the `_redacted` variant. When the shape is too complex to extract a path reliably (`awk`, `sed`, `grep`, `file`), a generic `read-ambiguous` pattern refuses with a broad redirect. The arms-race against creative shell shapes (`awk '{print}' .env`) is explicitly not pursued -- the spec accepts that residual surface.
+
+4. **`ssh_sudo_write(local_path=)` reads file into memory.** The `local_path` mode uses `resolve_local_path` from `services/local_path_policy.py` (same operator setup as `ssh_upload`'s `local_path` mode, `SSH_LOCAL_TRANSFER_ROOTS` required). The local file is read into MCP server memory, then piped via stdin into the sudo pipeline. This avoids the LLM having to generate large base64 payloads. True streaming (no in-memory buffer) is deferred to v1.14.
+
+5. **`ssh_sudo_edit` preserves both ownership AND mode.** Two `sudo stat` calls run before write-back: `stat -c '%U:%G'` for owner/group and `stat -c '%a'` for octal permission bits. A secrets file at `0o600` must not get widened to the write helper's `0o644` default. This is security-critical: the default is applied ONLY as a fallback when stat returns `None` (file vanished between read and write -- an edge case, not the normal path).
+
+6. **`SudoFileOpError` as the new exception class.** Path-policy failures (`PathNotAllowed`, `PathRestricted`, `RedactBypassBlocked`) continue to be raised upstream in `services/path_policy.py` before any sudo invocation. `SudoFileOpError` covers failures inside the sudo pipeline itself (sudo refused, cat/ls/stat failed, parse failure, cap exceeded). Callers see a clean two-class failure surface.
+
+**Consequences:** The `redact_paths_globs` policy boundary now extends to root-owned files on hardened hosts. Operators with `ALLOW_SUDO=true` and `redact_bypass_policy=block` get consistent behavior across ssh-user-readable and root-owned paths: `.env` files are refused by both `ssh_sftp_download` and `ssh_sudo_read`, and both redirect to the `*_redacted` variant. The cheatsheet catches the most common `sudo cat .env` shapes and surfaces the redirect before any sudo invocation. Residual bypass surface via creative shell expressions is documented as INC-064 (unchanged from v1.4.0).
+
+**References:** [services/sudo_file_ops.py](src/ssh_mcp/services/sudo_file_ops.py), [tools/sudo_tools.py](src/ssh_mcp/tools/sudo_tools.py), [services/exec_cheatsheet.py](src/ssh_mcp/services/exec_cheatsheet.py), [ssh/errors.py](src/ssh_mcp/ssh/errors.py), INC-064.

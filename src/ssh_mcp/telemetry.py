@@ -103,7 +103,7 @@ def _get_tracer() -> Any:
     if not settings.OTEL_ENABLED:
         return None
     try:
-        from fastmcp.telemetry import get_tracer  # type: ignore[import-not-found]
+        from fastmcp.telemetry import get_tracer
 
         return get_tracer()
     except Exception:

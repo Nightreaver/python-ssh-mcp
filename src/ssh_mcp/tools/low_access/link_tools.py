@@ -25,8 +25,13 @@ from ...services.path_policy import (
     effective_restricted_paths,
     reject_bad_characters,
 )
+from ...services.redact_policy import (
+    resolve_restricted_globs,
+    should_block_redact_bypass,
+)
+from ...ssh.errors import RedactBypassBlocked
 from .._context import pool_from, require_posix, resolve_host, settings_from
-from ._helpers import WriteError, _is_missing
+from ._helpers import WriteError, _bypass_warnings, _is_missing
 
 if TYPE_CHECKING:
     from ...models.policy import HostPolicy
@@ -96,6 +101,7 @@ async def ssh_link(
 
     allowlist = effective_allowlist(policy, settings)
     restricted = effective_restricted_paths(policy, settings)
+    restricted_globs = resolve_restricted_globs(policy, settings)
 
     dst_canonical = await canonicalize_and_check(
         conn,
@@ -106,7 +112,13 @@ async def ssh_link(
         pool=pool,
         policy=policy,
     )
-    check_not_restricted(dst_canonical, restricted, policy.platform)
+    check_not_restricted(dst_canonical, restricted, policy.platform, restricted_globs=restricted_globs)
+    # Redact-bypass: link tools share the deny semantics of every other
+    # path-bearing tool. ``block`` raises before any link is created;
+    # ``warn`` attaches to ``output_warnings`` on the result.
+    if should_block_redact_bypass(dst_canonical, policy, settings):
+        raise RedactBypassBlocked(dst_canonical)
+    warnings = _bypass_warnings(dst_canonical, policy, settings)
 
     # Three modes, three different src-validation + creation strategies.
     # Body is dispatch + WriteResult assembly; the per-mode helpers own
@@ -127,6 +139,7 @@ async def ssh_link(
             path=dst_canonical,
             success=True,
             message=f"symbolic link -> {src}",
+            output_warnings=warnings,
         )
 
     if follow_symlinks:
@@ -145,6 +158,7 @@ async def ssh_link(
             path=dst_canonical,
             success=True,
             message=f"hard link (followed symlinks) -> {src_canonical}",
+            output_warnings=warnings,
         )
 
     src_full = await _create_hard_link_unfollowed(
@@ -162,6 +176,7 @@ async def ssh_link(
         path=dst_canonical,
         success=True,
         message=f"hard link (physical, unfollowed symlinks) -> {src_full}",
+        output_warnings=warnings,
     )
 
 

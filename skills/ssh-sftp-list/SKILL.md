@@ -79,8 +79,15 @@ enumeration operates anywhere the SSH user can already `lstat`. The
 allowlist gates mutating tools (low-access + dangerous tiers); reads
 follow the underlying SSH user's filesystem permissions.
 
+## Redaction policy
+
+This tool is subject to `redact_bypass_policy` when the listed path matches
+`redact_paths_globs`; see [`ssh_read_redacted`](../ssh-read-redacted/SKILL.md).
+
 ## Related
 
 - [`ssh_sftp_stat`](../ssh-sftp-stat/SKILL.md) -- single-file metadata.
 - [`ssh_find`](../ssh-find/SKILL.md) -- recursive name search with depth cap.
 - [`ssh_sftp_download`](../ssh-sftp-download/SKILL.md) -- fetch file contents.
+- [`ssh_sudo_sftp_list`](../ssh-sudo-sftp-list/SKILL.md) -- sudo-elevated
+  equivalent for directories the SSH user cannot traverse.

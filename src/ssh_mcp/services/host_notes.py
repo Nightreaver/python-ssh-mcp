@@ -25,6 +25,7 @@ import contextlib
 import os
 import re
 import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -130,3 +131,94 @@ def atomic_write_sidecar(path: Path, content: str) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
+
+
+# --- optimistic CAS for concurrent-writer safety (INC-065, v1.4.0) -------
+#
+# Two MCP server processes that both write to the same sidecar via
+# ``ssh_host_notes_append`` race: each reads the file, builds new content
+# from THEIR snapshot of existing, then writes. The second writer
+# silently clobbers the first's entry. ``atomic_write_sidecar`` is atomic
+# at the FS level (no torn write) but is not a logical CAS.
+#
+# Fix: capture (mtime_ns, size) at read time; re-stat immediately before
+# rename and bail out if the file changed since. Caller retries with a
+# fresh snapshot. Lock-free, portable across POSIX + Windows. There is a
+# tiny TOCTOU window between the final stat and the os.replace -- for our
+# contention level (a handful of agent sessions sharing a notes file) this
+# is statistically negligible; for stricter guarantees use a real flock.
+
+
+@dataclass(frozen=True)
+class SidecarSnapshot:
+    """Captured state of a sidecar at one point in time, used as the
+    basis for an optimistic CAS write.
+
+    ``text`` is the file contents (or ``None`` for missing files).
+    ``mtime_ns`` and ``size`` together form the version tag the CAS
+    compares against. Both ``None`` when the file did not exist at
+    capture time -- a later writer can still distinguish "I expected
+    no file" from "I expected file X" via the equality of the whole
+    snapshot.
+    """
+
+    text: str | None
+    mtime_ns: int | None
+    size: int | None
+
+
+def read_sidecar_with_snapshot(path: Path) -> SidecarSnapshot:
+    """Read sidecar contents AND capture the (mtime_ns, size) version tag
+    for a later CAS write. Missing file yields ``(None, None, None)``."""
+    try:
+        st = path.stat()
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return SidecarSnapshot(text=None, mtime_ns=None, size=None)
+    except OSError:
+        # Same degraded-read semantics as ``read_sidecar``: unreadable
+        # file is treated as "no content"; we cannot CAS against a state
+        # we could not capture, so signal that with all-None too.
+        return SidecarSnapshot(text=None, mtime_ns=None, size=None)
+    return SidecarSnapshot(text=text or None, mtime_ns=st.st_mtime_ns, size=st.st_size)
+
+
+def atomic_write_sidecar_if_unchanged(
+    path: Path,
+    content: str,
+    *,
+    expected_mtime_ns: int | None,
+    expected_size: int | None,
+) -> bool:
+    """Write ``content`` to ``path`` ONLY if the file's current
+    (mtime_ns, size) matches the expected snapshot. Returns ``True`` on
+    successful write, ``False`` when a concurrent writer beat us between
+    snapshot capture and this call. Caller retries by re-snapshotting,
+    rebuilding content, and calling again.
+
+    When ``expected_mtime_ns`` and ``expected_size`` are both ``None``
+    the caller is asserting the file did NOT exist at snapshot time;
+    write proceeds only if the file still does not exist.
+
+    NOT a real OS-level CAS: the window between our stat check and the
+    rename is a few microseconds. For our actual contention (small
+    number of agent sessions hitting the same notes file) this is fine;
+    high-contention scenarios need a real lock (``fcntl.flock`` on
+    POSIX). Documented in INC-065.
+    """
+    try:
+        st = path.stat()
+        actual_mtime_ns: int | None = st.st_mtime_ns
+        actual_size: int | None = st.st_size
+    except FileNotFoundError:
+        actual_mtime_ns = None
+        actual_size = None
+    except OSError:
+        # Couldn't even stat -- be conservative and refuse the write.
+        # Caller's retry will reach the same conclusion and surface the
+        # OSError up the stack via read_sidecar_with_snapshot.
+        return False
+    if actual_mtime_ns != expected_mtime_ns or actual_size != expected_size:
+        return False
+    atomic_write_sidecar(path, content)
+    return True

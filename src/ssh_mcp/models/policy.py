@@ -1,11 +1,12 @@
 """Per-host policy models loaded from hosts.toml. See DESIGN.md §5.7."""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # `Path` MUST stay as a runtime import (not under `TYPE_CHECKING`): pydantic
 # v2's model build calls `get_type_hints()` to resolve string annotations into
@@ -98,6 +99,34 @@ class HostPolicy(BaseModel):
     # Operators who must reach these paths fall back to ssh_exec_run /
     # ssh_sudo_exec (subject to dangerous-tier gating).
     restricted_paths: list[str] = Field(default_factory=list)
+    # v1.4.0: glob-aware sibling to ``restricted_paths``. Matched via
+    # ``pathlib.PurePosixPath.match`` (POSIX semantics). Unioned with the
+    # prefix list on the deny side. Example: ``["**/.env", "**/secrets/*"]``.
+    restricted_globs: list[str] = Field(default_factory=list)
+    # v1.4.0: paths matching any of these globs are READABLE via
+    # ``ssh_read_redacted`` but trip the bypass-policy (block/warn/audit_only)
+    # when other path-bearing tools touch them. NOT a deny list -- that's
+    # ``restricted_paths`` / ``restricted_globs``. The two are independent:
+    # a path that's in BOTH stays denied (restricted wins).
+    redact_paths_globs: list[str] = Field(default_factory=list)
+    # v1.4.0: per-host augmentation of the redact key list. APPENDED to the
+    # built-in defaults (see services/redact_policy._DEFAULT_REDACT_KEYS) and
+    # to env-level SSH_REDACT_KEYS_ADD. Mutually exclusive with
+    # ``redact_keys_replace`` at this scope -- combining them is a
+    # ConfigError at load time.
+    redact_keys_add: list[str] = Field(default_factory=list)
+    # v1.4.0: per-host REPLACEMENT of the redact key list. When set, REPLACES
+    # the built-in defaults entirely for this host. Mutually exclusive with
+    # ``redact_keys_add`` at the per-host scope.
+    redact_keys_replace: list[str] = Field(default_factory=list)
+    # v1.4.0: per-host override of SSH_REDACT_ENTROPY_DETECTION. None =>
+    # inherit the env-level value.
+    redact_entropy_detection: bool | None = None
+    # v1.4.0: per-host override of SSH_REDACT_BYPASS_POLICY. None => inherit.
+    redact_bypass_policy: Literal["block", "warn", "audit_only"] | None = None
+    # v1.4.0: per-host override of SSH_REDACT_HINT_CHARS. None => inherit.
+    # When set, must be in [0, 4]; the redactor clamps defensively.
+    redact_hint_chars: int | None = None
     command_allowlist: list[str] = Field(default_factory=list)
     proxy_jump: str | list[str] | None = None
     auth: AuthPolicy = Field(default_factory=AuthPolicy)
@@ -152,10 +181,30 @@ class HostPolicy(BaseModel):
             if p in ("*", "/"):
                 continue
             if not _is_absolute_any_platform(p):
-                raise ValueError(
-                    f"path_allowlist entry must be absolute (or '*' / '/'): {p!r}"
-                )
+                raise ValueError(f"path_allowlist entry must be absolute (or '*' / '/'): {p!r}")
         return v
+
+    @field_validator("redact_hint_chars")
+    @classmethod
+    def _check_redact_hint_chars(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if not 0 <= v <= 4:
+            raise ValueError(
+                f"redact_hint_chars must be in [0, 4] when set (got {v}); the "
+                "hint leaks 2N raw characters per secret, capped at 4 each side."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _check_redact_keys_mutex(self) -> HostPolicy:
+        if self.redact_keys_add and self.redact_keys_replace:
+            raise ValueError(
+                f"host {self.hostname!r}: redact_keys_add and redact_keys_replace "
+                "are mutually exclusive at the per-host scope. ADD appends to "
+                "the defaults; REPLACE swaps them out. Pick one."
+            )
+        return self
 
     @field_validator("restricted_paths")
     @classmethod

@@ -67,6 +67,66 @@ restricted_paths = []
 command_allowlist = []
 
 # ---------------------------------------------------------------------------
+# Secret-redaction policy (v1.4.0). Three independent path lists:
+#
+#   restricted_paths   -> hard-deny by prefix (existing, since v1.0)
+#   restricted_globs   -> hard-deny by glob (NEW v1.4.0)
+#   redact_paths_globs -> READABLE via ssh_read_redacted, but raw-content
+#                         tools (ssh_sftp_download, ssh_sftp_list, etc.)
+#                         trip the bypass-policy below.
+#
+# All three union per-host + global + env. Anything listed below applies to
+# every host unless the host's own block sets the field.
+# ---------------------------------------------------------------------------
+
+# Glob-aware hard-deny zones. Cheaper than restricted_paths if you only need
+# pattern matching (e.g. "deny anything that ends in .key anywhere on disk").
+# Glob syntax is pathlib.PurePosixPath.match. Unions with SSH_RESTRICTED_GLOBS.
+restricted_globs = []
+
+# Glob list for files the LLM may read via ssh_read_redacted (where secrets
+# get HMAC-SHA256-hashed inline) but NOT via ssh_sftp_download / cat-style
+# raw access. Unions with SSH_REDACT_PATHS_GLOBS in env.
+redact_paths_globs = [
+    "**/.env",
+    "**/.env.*",
+    "**/secrets/*",
+    "**/private*",
+    "**/credentials*",
+]
+
+# What happens when a raw-content tool hits a redact_paths_globs match:
+#   "block"      -> raise RedactBypassBlocked; error message points at
+#                   ssh_read_redacted as the right tool. SAFEST default.
+#   "warn"       -> deliver raw content, append warning to output_warnings.
+#                   Useful in dev when you trust the LLM not to leak.
+#   "audit_only" -> deliver raw content silently, stamp the audit-line with
+#                   redact_bypass=true. Use when you want the policy invisible
+#                   to the LLM but tracked by SIEM.
+redact_bypass_policy = "block"
+
+# Optional: extra redact-keys to ADD to the built-in defaults
+# (PASSWORD, PASSWD, SECRET, TOKEN, KEY, PRIVATE, CREDENTIAL, ^PASS_, _PASS$,
+# API_KEY, APIKEY, DSN, AUTH, BEARER, COOKIE, SESSION, JWT, OAUTH, SSH_KEY).
+# Substring-match by default; prefix-anchor with `^PREFIX_`, suffix-anchor
+# with `_SUFFIX$`, exact with `^EXACT$`.
+# redact_keys_add = ["MY_CUSTOM_TOKEN", "^INTERNAL_"]
+
+# OR replace the built-in defaults entirely (mutually exclusive with _add):
+# redact_keys_replace = ["PASSWORD", "API_KEY"]
+
+# Toggle entropy-based detection for unknown formats. Catches base64-shaped
+# (>= 20 chars) and hex (>= 32 chars) strings on non-comment lines, plus
+# PEM blocks (which are always redacted regardless of this toggle).
+# Default: true. Set false to reduce false positives on dev configs.
+# redact_entropy_detection = true
+
+# Leak the first + last N chars of secrets in addition to the hash, so
+# operators can visually compare "abc...xyz" vs the source. Clamped to
+# [0, 4]. Default 0 (no plaintext leak).
+# redact_hint_chars = 0
+
+# ---------------------------------------------------------------------------
 # Default auth. This is typically where the operator's workstation identity
 # lives -- one agent key pinned by fingerprint, offered to every host unless
 # a per-host [hosts.<name>.auth] block overrides.

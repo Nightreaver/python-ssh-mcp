@@ -151,9 +151,9 @@ _NEGATIVE_CASES: list[str] = [
     "tar -czf /tmp/backup.tar.gz /etc; sha256sum /tmp/backup.tar.gz",
     # Composite: mkdir-then-curl chain.
     "mkdir -p /tmp/foo && curl https://example.com/file | tar -xz",
-    # Plain read command, no redirect.
-    "cat /etc/hostname",
-    "ls /tmp",
+    # v1.4.0: ``cat /etc/hostname`` and ``ls /tmp`` now DO match -- they
+    # route to ssh_sftp_download / ssh_sftp_list respectively (read-single
+    # / list-single patterns). Kept in commit message for future audit.
     "uname -a",
     # systemctl verb not in matched list -- daemon-reload, reboot, etc.
     "systemctl daemon-reload",
@@ -485,9 +485,7 @@ def _whitespace_perturbations(cmd: str) -> list[str]:
     _NOISE_VARIANTS,
     ids=[c[0][:40] for c in _NOISE_VARIANTS],
 )
-def test_pattern_ordering_robust_to_whitespace_noise(
-    base: str, pattern_id: str, suggested_tool: str
-) -> None:
+def test_pattern_ordering_robust_to_whitespace_noise(base: str, pattern_id: str, suggested_tool: str) -> None:
     """Whitespace permutations must not shift which pattern fires.
 
     Catches regressions where a regex tightens its anchors and a benign
@@ -600,12 +598,9 @@ async def test_cheatsheet_rejection_audit_suppression_covers_all_three_tools(
         caplog.set_level(logging.INFO, logger="ssh_mcp.audit")
         with pytest.raises(CommandIsCheatsheetMatch):
             await tool_callable(host="testhost", command="docker ps", ctx=ctx)
-        audit_records = [
-            r for r in caplog.records if r.name == "ssh_mcp.audit" and r.levelno >= logging.INFO
-        ]
+        audit_records = [r for r in caplog.records if r.name == "ssh_mcp.audit" and r.levelno >= logging.INFO]
         assert audit_records == [], (
-            f"{tool_name} cheatsheet rejection emitted {len(audit_records)} audit line(s); "
-            "expected zero."
+            f"{tool_name} cheatsheet rejection emitted {len(audit_records)} audit line(s); " "expected zero."
         )
 
 
@@ -634,3 +629,149 @@ async def test_non_cheatsheet_error_still_audits(caplog: pytest.LogCaptureFixtur
         "non-cheatsheet error path must still produce an audit line; "
         "the suppression accidentally caught the wrong exception class."
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. v1.4.0: read / list / sudo-prefix patterns + path-aware suggestion.
+# ---------------------------------------------------------------------------
+
+
+def _policy_with_redact_globs(globs: list[str]) -> HostPolicy:
+    return HostPolicy(
+        hostname="testhost",
+        user="deploy",
+        auth=AuthPolicy(method="agent"),
+        redact_paths_globs=globs,
+    )
+
+
+def _settings_default() -> Settings:
+    return Settings(SSH_HOSTS_ALLOWLIST=["testhost"])  # type: ignore[call-arg]
+
+
+_READ_POSITIVE: list[tuple[str, str]] = [
+    ("cat /etc/hostname", "ssh_sftp_download"),
+    ("head -n 100 /var/log/syslog", "ssh_sftp_download"),
+    ("tail -n 50 /var/log/syslog", "ssh_sftp_download"),
+    ("less /etc/hosts", "ssh_sftp_download"),
+    ("more /etc/hosts", "ssh_sftp_download"),
+    ("view /etc/hosts", "ssh_sftp_download"),
+    ("xxd /bin/ls", "ssh_sftp_download"),
+    ("strings /bin/ls", "ssh_sftp_download"),
+    ("wc -l /etc/passwd", "ssh_sftp_download"),
+]
+
+
+@pytest.mark.parametrize(("command", "expected_tool"), _READ_POSITIVE)
+def test_read_single_pattern_suggests_plain(command: str, expected_tool: str) -> None:
+    """Path-aware fallback: no policy threaded -> plain ssh_sftp_download."""
+    match = match_cheatsheet(command)
+    assert match is not None
+    assert match.pattern_id == "read-single"
+    assert match.suggested_tool == expected_tool
+
+
+def test_read_single_redact_match_suggests_redacted() -> None:
+    policy = _policy_with_redact_globs(["**/.env"])
+    settings = _settings_default()
+    match = match_cheatsheet("cat /opt/app/.env", policy=policy, settings=settings)
+    assert match is not None
+    assert match.pattern_id == "read-single"
+    assert match.suggested_tool == "ssh_read_redacted"
+    assert "redact_paths_globs" in match.human_explanation
+
+
+def test_read_single_non_redact_suggests_plain() -> None:
+    policy = _policy_with_redact_globs(["**/.env"])
+    settings = _settings_default()
+    match = match_cheatsheet("cat /etc/hostname", policy=policy, settings=settings)
+    assert match is not None
+    assert match.suggested_tool == "ssh_sftp_download"
+
+
+def test_read_ambiguous_falls_back_to_generic() -> None:
+    for cmd in ("awk '{print}' /etc/passwd", "sed -i s/a/b/ /etc/foo", "grep root /etc/passwd"):
+        match = match_cheatsheet(cmd)
+        assert match is not None, cmd
+        assert match.pattern_id == "read-ambiguous"
+        assert match.suggested_tool == "ssh_sftp_download"
+
+
+def test_list_single_pattern_suggests_sftp_list() -> None:
+    match = match_cheatsheet("ls /tmp")
+    assert match is not None
+    assert match.pattern_id == "list-single"
+    assert match.suggested_tool == "ssh_sftp_list"
+
+
+def test_list_single_with_flags() -> None:
+    match = match_cheatsheet("ls -la /tmp")
+    assert match is not None
+    assert match.pattern_id == "list-single"
+
+
+def test_sudo_cat_suggests_sudo_read() -> None:
+    match = match_cheatsheet("sudo cat /etc/shadow")
+    assert match is not None
+    assert match.pattern_id == "sudo-read-single"
+    assert match.suggested_tool == "ssh_sudo_read"
+
+
+def test_sudo_cat_redact_suggests_sudo_read_redacted() -> None:
+    policy = _policy_with_redact_globs(["**/.env"])
+    settings = _settings_default()
+    match = match_cheatsheet(
+        "sudo cat /docker/dev/modified_shop/.env",
+        policy=policy,
+        settings=settings,
+    )
+    assert match is not None
+    assert match.pattern_id == "sudo-read-single"
+    assert match.suggested_tool == "ssh_sudo_read_redacted"
+
+
+def test_sudo_tee_suggests_sudo_write() -> None:
+    match = match_cheatsheet("sudo tee /etc/myapp/config.toml")
+    assert match is not None
+    assert match.pattern_id == "sudo-write-single"
+    assert match.suggested_tool == "ssh_sudo_write"
+
+
+def test_sudo_sh_c_cat_suggests_sudo_write() -> None:
+    match = match_cheatsheet("sudo sh -c 'cat > /etc/foo'")
+    assert match is not None
+    assert match.pattern_id == "sudo-write-single"
+    assert match.suggested_tool == "ssh_sudo_write"
+
+
+def test_sudo_vi_suggests_sudo_edit() -> None:
+    for editor in ("vi", "vim", "nano", "emacs", "ed"):
+        match = match_cheatsheet(f"sudo {editor} /etc/foo")
+        assert match is not None, editor
+        assert match.pattern_id == "sudo-edit-single"
+        assert match.suggested_tool == "ssh_sudo_edit"
+
+
+def test_sudo_ls_suggests_sudo_sftp_list() -> None:
+    match = match_cheatsheet("sudo ls /root")
+    assert match is not None
+    assert match.pattern_id == "sudo-list-single"
+    assert match.suggested_tool == "ssh_sudo_sftp_list"
+
+
+def test_sudo_docker_still_routes_to_docker_pattern() -> None:
+    """sudo-prefixed but the inner is docker -> falls through to docker
+    pattern (legitimate use of sudo for docker on hardened hosts)."""
+    match = match_cheatsheet("sudo docker ps")
+    assert match is not None
+    assert match.pattern_id == "docker"
+
+
+def test_read_single_composite_does_not_match() -> None:
+    """``cat /etc/x | grep root`` is a legitimate pipeline -- the matcher
+    refuses to extract a path from it."""
+    match = match_cheatsheet("cat /etc/passwd | grep root")
+    # Not read-single (composite). Could fall through to other patterns; just
+    # assert it's not the new read-single pattern.
+    if match is not None:
+        assert match.pattern_id != "read-single"

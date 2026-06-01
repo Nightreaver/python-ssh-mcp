@@ -6,7 +6,7 @@ import os as _os
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # SSH_MCP_DISABLE_DOTENV=1 skips .env file loading entirely. Set by
@@ -148,7 +148,55 @@ class Settings(BaseSettings):
     SSH_RESTRICTED_PATHS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     SSH_COMMAND_ALLOWLIST: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
-    # Local-disk allowlist for the `local_path` upload/download mode (v1.3.0).
+    # --- Secret-redaction policy (v1.4.0) ---
+    # Glob-aware sibling to SSH_RESTRICTED_PATHS. Prefix-based ``restricted_paths``
+    # stays as-is (cheap, simple); these globs are unioned on the deny side and
+    # match via ``pathlib.PurePosixPath.match`` (POSIX semantics; Windows hosts
+    # still flow through path_policy's Platform parameter). Example:
+    #   SSH_RESTRICTED_GLOBS=**/.env,**/secrets/*,**/private*
+    SSH_RESTRICTED_GLOBS: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Paths matching any of these globs are READABLE via ``ssh_read_redacted``
+    # but trip the bypass-policy (block/warn/audit_only) when accessed via
+    # ``ssh_sftp_download`` / other path-bearing tools that would return raw
+    # bytes. Distinct from ``SSH_RESTRICTED_GLOBS`` -- that one is hard-deny.
+    SSH_REDACT_PATHS_GLOBS: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Per-key redaction list (case-insensitive substring match on the KEY name
+    # in KEY=VALUE shapes). MUTUALLY EXCLUSIVE with SSH_REDACT_KEYS_REPLACE:
+    # setting both at this scope raises a validation error. ADD appends to
+    # the built-in defaults (PASSWORD, PASSWD, SECRET, TOKEN, KEY, PRIVATE,
+    # CREDENTIAL[S], API_KEY, APIKEY, DSN, AUTH, BEARER, COOKIE, SESSION,
+    # JWT, OAUTH, SSH_KEY -- see services/redact_policy._DEFAULT_REDACT_KEYS).
+    SSH_REDACT_KEYS_ADD: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # REPLACE swaps out the defaults entirely. Use when the defaults include
+    # something you specifically want to expose (e.g. a non-secret ``KEY``
+    # field), or when you want a tight allowlist of exactly N tokens.
+    SSH_REDACT_KEYS_REPLACE: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # HMAC-SHA256 key for hashed-output redaction. When set, the marker emitted
+    # for a redacted value is ``<sha:abcdef123456 len:48>`` where the hex
+    # prefix is deterministic across hosts (lets the LLM compare secrets by
+    # identity without seeing them). When EMPTY (the default), the engine
+    # falls back to plain SHA256 -- still deterministic, but an attacker with
+    # a known plaintext can confirm it without the salt. Recommended >= 32
+    # chars of random data; rejected at startup if set to <32 chars.
+    SSH_REDACT_SALT: str = ""
+    # When True (default), the redactor ALSO scans for high-entropy strings
+    # outside KEY=VALUE shape (base64 >= 20 chars, hex >= 32 chars). PEM blocks
+    # are ALWAYS redacted regardless. When False, only KEY=VALUE matches are
+    # redacted -- hardcoded secrets in random scripts pass through.
+    SSH_REDACT_ENTROPY_DETECTION: bool = True
+    # What happens when a path-bearing tool (ssh_sftp_download, ssh_sftp_list,
+    # ssh_find, ssh_file_hash, file-ops) touches a path matching
+    # SSH_REDACT_PATHS_GLOBS. ``block``: refuse with RedactBypassBlocked
+    # pointing at ssh_read_redacted. ``warn`` (default): deliver raw content
+    # with a warning appended to output_warnings. ``audit_only``: deliver
+    # silently with a flag in the audit line.
+    SSH_REDACT_BYPASS_POLICY: Literal["block", "warn", "audit_only"] = "warn"
+    # If non-zero, ssh_read_redacted's marker carries ``hint:<first-N>...<last-N>``
+    # so humans can compare secrets across hosts at a glance. Leaks 2N chars
+    # of plaintext per secret -- USE WITH CARE. Capped at 4 each side.
+    SSH_REDACT_HINT_CHARS: int = 0
+
+    # Local-disk allowlist for the `local_path` upload/download mode (v1.10.0).
     # When ``ssh_upload`` / ``ssh_deploy`` / ``ssh_sftp_download`` are called
     # with ``local_path=...`` the MCP server reads/writes that file directly
     # on its OWN filesystem instead of routing the bytestream through the
@@ -192,6 +240,10 @@ class Settings(BaseSettings):
         "SSH_HOSTS_BLOCKLIST",
         "SSH_PATH_ALLOWLIST",
         "SSH_RESTRICTED_PATHS",
+        "SSH_RESTRICTED_GLOBS",
+        "SSH_REDACT_PATHS_GLOBS",
+        "SSH_REDACT_KEYS_ADD",
+        "SSH_REDACT_KEYS_REPLACE",
         "SSH_COMMAND_ALLOWLIST",
         "SSH_ENABLED_GROUPS",
         "SSH_BM25_ALWAYS_VISIBLE",
@@ -263,8 +315,46 @@ class Settings(BaseSettings):
     MCP_HTTP_HOST: str = "127.0.0.1"
     MCP_HTTP_PORT: int = 8000
 
+    @model_validator(mode="after")
+    def _check_redact_config(self) -> Settings:
+        """Validate the secret-redaction knobs introduced in v1.4.0.
+
+        Three checks:
+
+        1. ``SSH_REDACT_KEYS_ADD`` and ``SSH_REDACT_KEYS_REPLACE`` are mutually
+           exclusive -- ADD appends to the built-in defaults, REPLACE swaps
+           them out, and combining the two is almost certainly an operator
+           typo. Raise a clear error naming both knobs so the fix is obvious.
+        2. ``SSH_REDACT_SALT`` is either empty (warned-but-allowed plain-SHA256
+           mode) OR at least 32 chars of operator-chosen entropy. Sub-32 is
+           almost certainly an accidental short string; we reject so the
+           operator notices.
+        3. ``SSH_REDACT_HINT_CHARS`` clamped to ``[0, 4]``. The hint deliberately
+           leaks 2N raw characters per secret; capping at 4 each side limits
+           the damage of an over-permissive operator value.
+        """
+        if self.SSH_REDACT_KEYS_ADD and self.SSH_REDACT_KEYS_REPLACE:
+            raise ValueError(
+                "SSH_REDACT_KEYS_ADD and SSH_REDACT_KEYS_REPLACE are mutually "
+                "exclusive: ADD appends to the built-in defaults, REPLACE swaps "
+                "them out. Set one or the other, not both."
+            )
+        if self.SSH_REDACT_SALT and len(self.SSH_REDACT_SALT) < 32:
+            raise ValueError(
+                f"SSH_REDACT_SALT must be at least 32 chars when set "
+                f"(got {len(self.SSH_REDACT_SALT)}). Pick a strong random "
+                "secret, or leave empty to use plain-SHA256 mode."
+            )
+        if not 0 <= self.SSH_REDACT_HINT_CHARS <= 4:
+            raise ValueError(
+                f"SSH_REDACT_HINT_CHARS must be in [0, 4] "
+                f"(got {self.SSH_REDACT_HINT_CHARS}); the hint leaks 2N raw "
+                "characters per secret, capping at 4 each side limits exposure."
+            )
+        return self
+
     # --- Observability ---
-    VERSION: str = "1.3.0"
+    VERSION: str = "1.4.0"
     LOG_LEVEL: str = "INFO"
     OTEL_ENABLED: bool = True
 

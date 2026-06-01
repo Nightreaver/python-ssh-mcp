@@ -24,7 +24,9 @@ from ..models.results import HostNotesResult, HostNotesWriteResult
 from ..services.audit import audited
 from ..services.host_notes import (
     atomic_write_sidecar,
+    atomic_write_sidecar_if_unchanged,
     read_sidecar,
+    read_sidecar_with_snapshot,
     resolve_sidecar_path,
     try_resolve_sidecar_path,
 )
@@ -99,45 +101,80 @@ async def ssh_host_notes_append(host: str, entry: str, ctx: Context) -> HostNote
     operator hasn't explicitly told you to persist. The sidecar is a
     plain file on the operator's MCP host. Treat it as guidance for your
     future self, not as a database.
+
+    **Concurrent writers (v1.4.0, INC-065):** when two MCP server
+    processes both append to the same sidecar around the same time, the
+    second writer used to silently clobber the first. This tool now uses
+    optimistic CAS: capture (mtime, size) at read, re-stat before write,
+    rebuild + retry if the file changed since. Up to 5 retries; if a
+    concurrent writer beats us 5 times in a row the call raises -- caller
+    should retry the whole tool call.
     """
     if not entry or not entry.strip():
         raise ValueError("entry must be non-empty (after stripping whitespace)")
     policy = resolve_host(ctx, host).policy
     settings = settings_from(ctx)
     sidecar = resolve_sidecar_path(settings.SSH_HOST_NOTES_DIR, host)
-
-    existing = read_sidecar(sidecar) or ""
-    was_created = existing == ""
     timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     suffix = f"## {timestamp}\n{entry.rstrip()}\n"
-    if existing:
-        new_content = f"{existing.rstrip()}\n\n{suffix}"
-    else:
-        new_content = (
-            f"# Agent notes for `{host}` ({policy.hostname})\n\n"
-            f"Written by ssh-mcp's agent-notes tools. Free-form across "
-            f"sessions. Operator can read these as plain Markdown.\n\n"
-            f"{suffix}"
-        )
-
     cap = settings.SSH_HOST_NOTES_MAX_BYTES
-    encoded_len = len(new_content.encode("utf-8"))
-    if encoded_len > cap:
-        raise ValueError(
-            f"sidecar would be {encoded_len} bytes after append; cap is "
-            f"SSH_HOST_NOTES_MAX_BYTES={cap}. Use ssh_host_notes_set to "
-            f"consolidate the file (drop stale entries) before appending."
-        )
 
-    atomic_write_sidecar(sidecar, new_content)
-    return HostNotesWriteResult(
-        alias=host,
-        hostname=policy.hostname,
-        agent_notes_path=str(sidecar),
-        bytes_written=encoded_len,
-        was_created=was_created,
-        message=("created sidecar with first entry" if was_created else "appended timestamped entry"),
+    # CAS retry loop. Each attempt: snapshot -> build content from THIS
+    # snapshot -> write iff mtime+size still match. Concurrent writer
+    # beats us -> snapshot changed on next read -> rebuild against the
+    # newer existing content -> retry. Bounded at 5 iterations to avoid
+    # unbounded spin under pathological contention; in practice 2 is
+    # enough.
+    last_was_created = False
+    last_encoded_len = 0
+    for _attempt in range(_NOTES_APPEND_MAX_RETRIES):
+        snap = read_sidecar_with_snapshot(sidecar)
+        existing = snap.text or ""
+        last_was_created = existing == ""
+        if existing:
+            new_content = f"{existing.rstrip()}\n\n{suffix}"
+        else:
+            new_content = (
+                f"# Agent notes for `{host}` ({policy.hostname})\n\n"
+                f"Written by ssh-mcp's agent-notes tools. Free-form across "
+                f"sessions. Operator can read these as plain Markdown.\n\n"
+                f"{suffix}"
+            )
+        last_encoded_len = len(new_content.encode("utf-8"))
+        if last_encoded_len > cap:
+            raise ValueError(
+                f"sidecar would be {last_encoded_len} bytes after append; cap is "
+                f"SSH_HOST_NOTES_MAX_BYTES={cap}. Use ssh_host_notes_set to "
+                f"consolidate the file (drop stale entries) before appending."
+            )
+        if atomic_write_sidecar_if_unchanged(
+            sidecar,
+            new_content,
+            expected_mtime_ns=snap.mtime_ns,
+            expected_size=snap.size,
+        ):
+            return HostNotesWriteResult(
+                alias=host,
+                hostname=policy.hostname,
+                agent_notes_path=str(sidecar),
+                bytes_written=last_encoded_len,
+                was_created=last_was_created,
+                message=(
+                    "created sidecar with first entry" if last_was_created else "appended timestamped entry"
+                ),
+            )
+        # else: concurrent writer beat us. Loop, rebuild from fresh snapshot.
+    raise RuntimeError(
+        f"sidecar {sidecar} changed by a concurrent writer "
+        f"{_NOTES_APPEND_MAX_RETRIES} times in a row; another MCP server "
+        "process appears to be hammering the same file. Retry the call."
     )
+
+
+# Bounded retry count for the CAS loop in ssh_host_notes_append. 5 covers
+# realistic agent contention; pathological hammering surfaces as a clear
+# RuntimeError instead of an unbounded spin.
+_NOTES_APPEND_MAX_RETRIES = 5
 
 
 @mcp_server.tool(tags={"low-access", "group:host"}, version="1.0")
@@ -158,6 +195,15 @@ async def ssh_host_notes_set(host: str, content: str, ctx: Context) -> HostNotes
     Atomic: temp file + os.replace. Capped at `SSH_HOST_NOTES_MAX_BYTES`.
     Same caveats as `ssh_host_notes_append` -- no secrets, this is plain
     text on the operator's MCP host.
+
+    **Concurrent writers (v1.4.0, INC-065):** unlike
+    `ssh_host_notes_append`, `_set` is deliberately last-writer-wins.
+    The caller already decided to replace the file wholesale; if a
+    concurrent writer slipped an `_append` in between the caller's read
+    and this call, that appended entry IS lost. If you need the safe
+    flow, call `ssh_host_notes` immediately before `ssh_host_notes_set`
+    and accept that other agents may still race. A CAS variant of `_set`
+    (with an `expected_etag` argument) is a v1.14 candidate.
     """
     policy = resolve_host(ctx, host).policy
     settings = settings_from(ctx)

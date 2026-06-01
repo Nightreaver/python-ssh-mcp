@@ -37,6 +37,17 @@ Cheatsheet rejection behavior (B1 sprint, v1.9.0):
   command through, the audit line gains ``cheatsheet_pattern_id=<id>``
   so operators can grep ``jq 'select(.cheatsheet_pattern_id)'`` to
   count opt-out bypasses by pattern.
+
+Redact-bypass field (v1.4.0):
+
+- When a path-bearing tool resolves a path that matches the
+  ``SSH_REDACT_PATHS_GLOBS`` set under ``warn`` or ``audit_only``
+  policy, ``services.redact_policy.check_redact_bypass`` flips a
+  per-call ContextVar and the audit line gains ``redact_bypass: true``.
+  ``block`` mode raises ``RedactBypassBlocked`` upstream and shows up
+  as ``result=error`` with that error class, so it doesn't carry the
+  flag (would be redundant). Operators grep
+  ``jq 'select(.redact_bypass)'`` to find raw-secret deliveries.
 """
 
 from __future__ import annotations
@@ -82,6 +93,38 @@ def set_cheatsheet_bypass(pattern_id: str) -> None:
     """
     _cheatsheet_bypass_pattern.set(pattern_id)
 
+
+# Per-call telemetry slot: when ``services.redact_policy.check_redact_bypass``
+# resolves to ``warn`` or ``audit_only`` -- i.e. the path matched a redact
+# glob and the policy delivered raw bytes to the LLM anyway -- the helper
+# flips this to ``True`` so the audit decorator emits ``redact_bypass: true``
+# on the audit line. The ``block`` path raises ``RedactBypassBlocked`` upstream
+# and already shows up as ``result=error`` so the flag is not needed there.
+#
+# Parallel construction to ``_cheatsheet_bypass_pattern``: reset at the top of
+# every ``@audited`` wrapper invocation so a previous tool call's state never
+# leaks into the next one on the same task / contextvars copy.
+_redact_bypass_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ssh_mcp_redact_bypass_active",
+    default=False,
+)
+
+
+def set_redact_bypass_active(active: bool = True) -> None:
+    """Mark the current tool call as having delivered raw bytes from a
+    redact-list path (``warn`` or ``audit_only`` bypass mode).
+
+    Called by :func:`ssh_mcp.services.redact_policy.check_redact_bypass`
+    (and any caller in tools that surfaces the bypass) so the ``@audited``
+    wrapper can stamp ``redact_bypass: true`` onto the audit line in
+    ``finally``. The flag is intentionally a bool, not a mode string --
+    one optional field keeps audit lines lean (per briefing) and operators
+    only need to grep ``jq 'select(.redact_bypass)'``; the mode is
+    recoverable from policy config when forensics need it.
+    """
+    _redact_bypass_active.set(active)
+
+
 # `redact_command_string` preserves the secret's byte-length (`<redacted:7>`)
 # so log readers can spot anomalies. For audit hashes that goal flips: we want
 # DEDUP, so two calls that differ only in password value produce the same
@@ -118,6 +161,7 @@ def record(
     exit_code: int | None = None,
     error: str | None = None,
     cheatsheet_pattern_id: str | None = None,
+    redact_bypass: bool = False,
 ) -> None:
     """Emit a single JSON audit line."""
     event: dict[str, Any] = {
@@ -164,6 +208,13 @@ def record(
         # ``journalctl``) with no secret content, and operators need to
         # filter on them directly: ``jq 'select(.cheatsheet_pattern_id)'``.
         event["cheatsheet_pattern_id"] = cheatsheet_pattern_id
+    if redact_bypass:
+        # Emitted only when this call delivered raw bytes from a redact-list
+        # path under ``warn`` or ``audit_only`` policy. Omitted (not
+        # ``false``) in the common case to keep audit lines lean -- same
+        # convention as ``cheatsheet_pattern_id``. Operators dedup with
+        # ``jq 'select(.redact_bypass)'``.
+        event["redact_bypass"] = True
     _logger.info(json.dumps(event, separators=(",", ":"), sort_keys=True))
 
 
@@ -240,6 +291,13 @@ def audited(tier: str) -> Callable[[F], F]:
             # token-based reset bounds the variable to this call's scope
             # even when many tools dispatch sequentially on one task.
             cheatsheet_token = _cheatsheet_bypass_pattern.set(None)
+            # Same token-reset shape for the redact-bypass flag. ``warn`` and
+            # ``audit_only`` modes flip it via ``set_redact_bypass_active``
+            # below; ``block`` mode raises upstream so this stays False on
+            # the error path. Read + reset in ``finally`` so the audit line
+            # gets ``redact_bypass: true`` only when the helper actually
+            # marked the call.
+            redact_token = _redact_bypass_active.set(False)
             # Prefer kwargs["host"] (how FastMCP delivers arguments); fall back
             # to args[0] for the odd positional-only caller. INC-048: type-check
             # args[0] so a tool signature that happens to put ``ctx`` or a
@@ -325,6 +383,8 @@ def audited(tier: str) -> Callable[[F], F]:
                     )
                 cheatsheet_pattern_id = _cheatsheet_bypass_pattern.get()
                 _cheatsheet_bypass_pattern.reset(cheatsheet_token)
+                redact_bypass_flag = _redact_bypass_active.get()
+                _redact_bypass_active.reset(redact_token)
                 if not suppress_audit_record:
                     record(
                         tool=fn.__name__,
@@ -338,6 +398,7 @@ def audited(tier: str) -> Callable[[F], F]:
                         unit=unit_capture,
                         error=error_msg,
                         cheatsheet_pattern_id=cheatsheet_pattern_id,
+                        redact_bypass=redact_bypass_flag,
                     )
 
         return wrapper  # type: ignore[return-value]

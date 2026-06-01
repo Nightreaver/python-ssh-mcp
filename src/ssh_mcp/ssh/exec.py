@@ -147,9 +147,10 @@ async def run(
         # once even when both stdout and stderr had ANSI.
         stdout_text, stderr_text, output_warnings = _sanitize_pair(stdout_text, stderr_text)
 
-        killed_by = None
-        if getattr(result, "signal", None):
-            killed_by = str(result.signal)
+        # asyncssh stubs miss .signal on SSHCompletedProcess as of 2.17;
+        # the attribute exists at runtime for signal-killed processes.
+        signal_attr = getattr(result, "signal", None)
+        killed_by = str(signal_attr) if signal_attr else None
 
         exit_code = int(result.exit_status if result.exit_status is not None else -1)
         s.set_attribute("ssh.exit_code", exit_code)

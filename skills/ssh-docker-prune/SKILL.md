@@ -30,6 +30,9 @@ interactive confirm. `all_=True` is only meaningful for `image` and `system`:
 
 - Scheduled cleanup on a host with bounded disk.
 - After `compose_down` when you want to reclaim image layers too.
+- After `ssh_docker_system_df` told you a specific category has reclaimable
+  space worth the prune -- target that scope (`image`, `volume`, `container`,
+  `network`, or `system`) instead of pruning blind.
 
 ## When NOT to call it
 
@@ -50,5 +53,8 @@ ssh_docker_prune(host="docker1", scope="system")
 
 ## Related
 
+- [`ssh_docker_system_df`](../ssh-docker-system-df/SKILL.md) -- read-tier
+  sibling. Always run BEFORE prune to estimate impact; the `Reclaimable`
+  field per category tells you what this tool would actually free.
 - [`ssh_docker_rm`](../ssh-docker-rm/SKILL.md)
 - [`ssh_docker_rmi`](../ssh-docker-rmi/SKILL.md)

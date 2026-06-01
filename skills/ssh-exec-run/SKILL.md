@@ -122,6 +122,9 @@ tool so the LLM can redirect cleanly.
 | `heredoc`         | `<<EOF` / `tee path` / `echo "..." > path` / `printf > path`   | `ssh_upload(content_text=...)`       |
 | `single-fileop`   | Plain `mkdir`/`cp`/`mv`/`rm` with no `|`/`&&`/`;`/`||`/`$(`    | `ssh_mkdir` / `ssh_cp` / `ssh_mv` / `ssh_delete` / `ssh_delete_folder` |
 | `output-redirect` | `> <file>` (not `>>`, not `2>`/`&>`/`1>`, not `> /dev/null`)   | `ssh_upload`                         |
+| `read-single`     | `cat|head|tail|less|more|view|xxd|od|strings|wc <single-path>` | `ssh_sftp_download` or `ssh_read_redacted` (path-aware: if path matches `redact_paths_globs`, suggests the `_redacted` variant) |
+| `read-ambiguous`  | `awk|sed|grep|file <anything>` (multi-file / filter / expression) | `ssh_sftp_download` (generic; path not reliably extractable) |
+| `list-single`     | `ls [-flags] <single-path>`                                    | `ssh_sftp_list`                      |
 
 Read-tier `apt` verbs (`apt list`, `apt search`, `apt show`) and
 `apt-mark` are intentionally NOT matched: `apt list --installed | grep

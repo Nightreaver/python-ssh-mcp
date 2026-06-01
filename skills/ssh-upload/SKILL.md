@@ -156,3 +156,6 @@ ssh_upload(
   full overwrite.
 - [`ssh_cp`](../ssh-cp/SKILL.md) -- back up the existing file before
   overwriting (or use `ssh_deploy`).
+- [`ssh_sudo_write`](../ssh-sudo-write/SKILL.md) -- sudo-elevated write for
+  root-owned files; same three-way payload mutex (`content_text` /
+  `content_base64` / `local_path`) with ownership preservation.

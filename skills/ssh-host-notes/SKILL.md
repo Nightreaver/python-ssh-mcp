@@ -59,6 +59,19 @@ After your work, when you've LEARNED something durable about the host
 without health checks"), append it via `ssh_host_notes_append` so future
 sessions inherit the knowledge.
 
+## Expected sidecar structure
+
+When `agent_notes` is non-empty, expect (and maintain) the **canonical
+structure** documented in
+[`ssh_host_notes_append`](../ssh-host-notes-append/SKILL.md): At-a-glance
+facts (OS / hardware / disks / role) at the top for operator quick-scan,
+followed by Platform quirks / Storage layout / Workloads / Open TODOs,
+ending with the append-only Timeline of timestamped entries (oldest ->
+newest). If the file you read isn't in this shape (legacy minimal-header
+sidecar, free-form drift), plan a consolidation via
+[`ssh_host_notes_set`](../ssh-host-notes-set/SKILL.md) once you have a
+clearer picture of the host -- but don't drop facts.
+
 ## When NOT to call it
 
 - The host has `has_notes: false` in `ssh_host_list` AND it's a host

@@ -120,9 +120,29 @@ print(r["local_path_written"])   # canonical destination path
   `SSH_LOCAL_TRANSFER_ROOTS`, or the roots list is empty.
 - SFTP "no such file" / "permission denied" -> tool error.
 
+## Redaction policy interaction
+
+When the operator has configured `redact_paths_globs` (e.g. `**/.env`) and
+`redact_bypass_policy`, this tool may be blocked or warned on matching paths:
+
+| `redact_bypass_policy` | What happens |
+|---|---|
+| `block` (recommended default) | Raises `RedactBypassBlocked`. Error message names `ssh_read_redacted` as the correct tool. No content delivered. Audit line shows `result=error`. |
+| `warn` | Delivers raw content AND appends a warning to `output_warnings`: `"redact-list path: prefer ssh_read_redacted"`. Audit line gains `redact_bypass=true`. |
+| `audit_only` | Delivers raw content silently. Audit line gains `redact_bypass=true` for SIEM. LLM sees no warning. |
+
+Use `ssh_read_redacted` instead of this tool when reading `.env` files,
+secret stores, or any path on `redact_paths_globs` -- you get the file
+structure with secrets hashed, safe to keep in the LLM context.
+
 ## Related
 
+- [`ssh_read_redacted`](../ssh-read-redacted/SKILL.md) -- the correct tool
+  for redact-listed paths; delivers secrets as HMAC-SHA256 markers instead
+  of plaintext.
 - [`ssh_sftp_stat`](../ssh-sftp-stat/SKILL.md) -- check size before downloading.
 - [`ssh_edit`](../ssh-edit/SKILL.md) -- modify in-place without download-then-upload.
 - [`ssh_upload`](../ssh-upload/SKILL.md) -- write a file back (low-access tier;
   also supports `local_path` for large payloads).
+- [`ssh_sudo_read`](../ssh-sudo-read/SKILL.md) -- for root-owned files the
+  SSH user cannot reach; sudo-elevated equivalent of this tool.

@@ -79,7 +79,31 @@ ssh_sudo_exec(host="web01", command="systemctl status nginx")
 - `exit_code=1` with "a password is required" -- passwordless sudoers isn't
   configured and no password source is reachable.
 
+## Cheatsheet patterns (v1.4.0+)
+
+`ssh_sudo_exec` also applies path-aware cheatsheet rejection from v1.4.0.
+The new sudo-prefix patterns match `sudo cat`, `sudo head`, `sudo tail`,
+`sudo ls`, `sudo tee`, `sudo vi/vim/nano/emacs/ed`, and `sudo sh -c 'cat > ...'`
+shapes and redirect to the dedicated sudo-tier path tools:
+
+| Pattern id          | Trigger shape                                  | Suggested wrapper               |
+|---------------------|------------------------------------------------|---------------------------------|
+| `sudo-read-single`  | `sudo cat|head|tail|less|... <single-path>`    | `ssh_sudo_read` or `ssh_sudo_read_redacted` (path-aware) |
+| `sudo-write-single` | `sudo tee <path>`                              | `ssh_sudo_write`                |
+| `sudo-edit-single`  | `sudo vi|vim|nano|emacs|ed <path>`             | `ssh_sudo_edit`                 |
+| `sudo-list-single`  | `sudo ls [-flags] <single-path>`               | `ssh_sudo_sftp_list`            |
+
+Path-aware routing: when the path unambiguously matches `redact_paths_globs`
+(e.g. `sudo cat /docker/app/.env` on a host with `**/.env` in the redact
+list), the rejection hint points to `ssh_sudo_read_redacted` instead of
+`ssh_sudo_read`.
+
 ## Related
 
 - [`ssh_sudo_run_script`](../ssh-sudo-run-script/SKILL.md) -- multi-line scripts under sudo.
 - [`ssh_exec_run`](../ssh-exec-run/SKILL.md) -- non-privileged exec. Prefer when possible.
+- [`ssh_sudo_read`](../ssh-sudo-read/SKILL.md) -- sudo-elevated file read (path-policy checked).
+- [`ssh_sudo_read_redacted`](../ssh-sudo-read-redacted/SKILL.md) -- sudo read with secret redaction.
+- [`ssh_sudo_write`](../ssh-sudo-write/SKILL.md) -- sudo-elevated atomic file write.
+- [`ssh_sudo_edit`](../ssh-sudo-edit/SKILL.md) -- sudo-elevated structured in-place edit.
+- [`ssh_sudo_sftp_list`](../ssh-sudo-sftp-list/SKILL.md) -- sudo-elevated directory listing.

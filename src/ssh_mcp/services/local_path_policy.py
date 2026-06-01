@@ -3,7 +3,7 @@
 Parallel to :mod:`ssh_mcp.services.path_policy` (which guards REMOTE paths via
 ``realpath`` on the SSH channel), but for the MCP server's OWN filesystem.
 Used by the ``local_path=`` mode of ``ssh_upload`` / ``ssh_deploy`` /
-``ssh_sftp_download`` (v1.3.0), where the bytestream is read from or written
+``ssh_sftp_download`` (v1.10.0), where the bytestream is read from or written
 to local disk directly instead of being routed through the MCP JSON channel
 as base64.
 

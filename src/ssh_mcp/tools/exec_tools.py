@@ -39,20 +39,27 @@ async def ssh_exec_run(
     skills/ssh-exec-run/SKILL.md. Non-zero exit is data, not raised. POSIX-only.
     """
     settings = settings_from(ctx)
-    # Cheatsheet pre-check FIRST -- before pool acquire, before check_command,
-    # before host resolution. We want the LLM to see the redirect hint without
-    # any side-effect (no connect, no audit-line for the rejected attempt).
-    # Under the opt-out (SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true) the precheck
-    # returns the match without raising; we use that match in B2 wiring below
-    # to PREPEND a "consider <wrapper> next time" hint to output_warnings.
+    # Resolve host BEFORE the cheatsheet so the path-aware suggestion has
+    # the per-host redact_paths_globs available. The resolve is cheap (in-
+    # memory hosts.toml lookup, no network) and an invalid host raises
+    # HostNotAllowed here -- same shape as without the cheatsheet wiring.
+    pool = pool_from(ctx)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
+    # Cheatsheet pre-check FIRST (after the cheap resolve) -- before pool
+    # acquire, before check_command. We want the LLM to see the redirect
+    # hint without any side-effect (no connect, no audit-line for the
+    # rejected attempt). Under the opt-out
+    # (SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS=true) the precheck returns the
+    # match without raising; we use that match in B2 wiring below to
+    # PREPEND a "consider <wrapper> next time" hint to output_warnings.
     cheatsheet_match = cheatsheet_precheck(
         command,
         settings.SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS,
         tool_name="ssh_exec_run",
+        policy=policy,
+        settings=settings,
     )
-    pool = pool_from(ctx)
-    resolved = resolve_host(ctx, host)
-    policy = resolved.policy
     require_posix(
         resolved,
         tool="ssh_exec_run",
@@ -136,19 +143,24 @@ async def ssh_exec_run_streaming(
     POSIX-only. Windows targets raise `PlatformNotSupported`.
     """
     settings = settings_from(ctx)
+    pool = pool_from(ctx)
+    resolved = resolve_host(ctx, host)
+    policy = resolved.policy
     cheatsheet_match = cheatsheet_precheck(
         command,
         settings.SSH_EXEC_ALLOW_CHEATSHEET_PATTERNS,
         tool_name="ssh_exec_run_streaming",
+        policy=policy,
+        settings=settings,
     )
-    pool = pool_from(ctx)
-    resolved = resolve_host(ctx, host)
-    policy = resolved.policy
     require_posix(resolved, tool="ssh_exec_run_streaming", reason="relies on POSIX shell + pkill cleanup")
     check_command(command, policy, settings)
     conn = await pool.acquire(resolved)
 
-    await progress.set_total(None)
+    # No known total for a streaming command — emit ``increment`` /
+    # ``set_message`` updates without a total. ``Progress.set_total``
+    # is strictly typed to ``int`` upstream, so we skip the "clear the
+    # total" call entirely; FastMCP treats an unset total as indeterminate.
 
     async def on_chunk(stream: str, chunk: str) -> None:
         # Emit the tail of the latest chunk so operators see progress in MCP

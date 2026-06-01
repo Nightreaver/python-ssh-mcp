@@ -83,6 +83,11 @@ ssh_find(host="db01", path="/var/lib/postgresql", name_pattern="*.bak", max_dept
 - `ValueError: kind must be one of 'f', 'd', 'l'`.
 - `truncated=true` -- narrow the search or raise `SSH_FIND_MAX_RESULTS`.
 
+## Redaction policy
+
+This tool is subject to `redact_bypass_policy` when the searched root matches
+`redact_paths_globs`; see [`ssh_read_redacted`](../ssh-read-redacted/SKILL.md).
+
 ## Related
 
 - [`ssh_sftp_list`](../ssh-sftp-list/SKILL.md) -- single-directory enumeration with metadata.

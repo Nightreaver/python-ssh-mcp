@@ -1,5 +1,5 @@
 """services/local_path_policy -- MCP-host filesystem allowlist for the
-v1.3.0 ``local_path`` upload/download mode.
+v1.10.0 ``local_path`` upload/download mode.
 
 Covers the contract in :func:`ssh_mcp.services.local_path_policy.resolve_local_path`:
 

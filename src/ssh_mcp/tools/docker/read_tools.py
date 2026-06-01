@@ -306,6 +306,28 @@ async def ssh_docker_volumes(
 
 @mcp_server.tool(tags={"safe", "read", "group:docker"}, version="1.0")
 @audited(tier="read")
+async def ssh_docker_system_df(host: str, ctx: Context) -> dict[str, Any]:
+    """Disk-usage summary across all docker object types.
+
+    Runs ``docker system df --format '{{json .}}'`` and parses the four
+    NDJSON rows into ``categories``: Images, Containers, Local Volumes,
+    Build Cache. Each row carries ``Type``, ``TotalCount``, ``Active``,
+    ``Size``, ``Reclaimable`` as Docker's own human-readable strings
+    (e.g. ``"1.5GB (45%)"``) -- no byte conversion happens here, callers
+    that need bytes should parse the string.
+
+    Use BEFORE ``ssh_docker_prune`` to estimate impact: ``Reclaimable``
+    on the matching category tells you what a prune would free. Also the
+    fastest answer to "why is ``/var/lib/docker`` getting full?" without
+    walking every image / container / volume individually.
+    """
+    argv = ["system", "df", "--format", "{{json .}}"]
+    result = await _run_docker(ctx, host, argv)
+    return {**result, "categories": _parse_json_lines(result.get("stdout", ""))}
+
+
+@mcp_server.tool(tags={"safe", "read", "group:docker"}, version="1.0")
+@audited(tier="read")
 async def ssh_docker_images(
     host: str,
     ctx: Context,

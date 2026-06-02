@@ -354,7 +354,7 @@ class Settings(BaseSettings):
         return self
 
     # --- Observability ---
-    VERSION: str = "1.5.1"
+    VERSION: str = "1.5.2"
     LOG_LEVEL: str = "INFO"
     OTEL_ENABLED: bool = True
 
